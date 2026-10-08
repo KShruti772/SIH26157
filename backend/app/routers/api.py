@@ -11,7 +11,8 @@ import asyncio
 from app.database import get_db, SessionLocal
 from app.models import domain
 from app.schemas import api as schemas
-from app.services import ingestion, evidence, workspace, reporting
+from app.services import ingestion, evidence, workspace, reporting, audit as audit_service
+from app.services.audit import AuditService, ReplayEngine, EventType, ActorType
 from app.analytics.engine import SupervisoryAnalyticsEngine
 
 from app.assurance.service import AssessmentAssuranceService
@@ -748,5 +749,111 @@ def submit_human_decision(
         raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================================================================
+# MODULE 9 — AUDIT & REPLAY ENDPOINTS
+# =========================================================================
+
+@router.get("/audit/events", response_model=List[schemas.AuditEventResponse])
+def get_audit_events(
+    entity_id: Optional[str] = None,
+    analysis_id: Optional[str] = None,
+    finding_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    order: str = "asc",
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve cryptographically chained audit events filtered by entity, analysis, finding, or actor.
+    """
+    svc = AuditService()
+    events = svc.get_events(
+        db=db,
+        entity_id=entity_id,
+        analysis_id=analysis_id,
+        finding_id=finding_id,
+        event_type=event_type,
+        actor_type=actor_type,
+        limit=limit,
+        offset=offset,
+        order=order,
+    )
+    return events
+
+
+@router.get("/audit/analysis/{analysis_id}", response_model=List[schemas.AuditEventResponse])
+def get_analysis_audit_events(analysis_id: str, db: Session = Depends(get_db)):
+    """
+    Retrieve the full chronological audit event trail for an assessment/analysis run.
+    """
+    svc = AuditService()
+    events = svc.get_analysis_events(db=db, analysis_id=analysis_id)
+    return events
+
+
+@router.get("/audit/integrity/{analysis_id}", response_model=schemas.AuditIntegrityResponse)
+def verify_audit_integrity(analysis_id: str, db: Session = Depends(get_db)):
+    """
+    Verifies cryptographic hash-chain integrity for all events in an analysis stream.
+    Validates previous-hash links and recomputed SHA-256 signatures.
+    """
+    svc = AuditService()
+    events = svc.get_analysis_events(db=db, analysis_id=analysis_id)
+    verification = svc.verify_chain(events)
+    entity_id = events[0].entity_id if events else None
+    return schemas.AuditIntegrityResponse(
+        analysis_id=analysis_id,
+        entity_id=entity_id,
+        valid=verification["valid"],
+        total_events=verification["total_events"],
+        broken_at_index=verification["broken_at_index"],
+        broken_event_id=verification["broken_event_id"],
+        error=verification["error"],
+        chain_hashes=verification["chain_hashes"],
+    )
+
+
+@router.post("/audit/replay/{analysis_id}", response_model=schemas.AuditReplayResponse)
+def replay_analysis(
+    analysis_id: str,
+    entity_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Executes offline deterministic replay of the supervisory assessment state.
+    Reconstructs findings, assurance, decisions, and capabilities from the audit stream
+    and validates state equality against persisted records.
+    """
+    engine = ReplayEngine()
+    result = engine.replay_analysis(db=db, analysis_id=analysis_id, entity_id=entity_id)
+    return schemas.AuditReplayResponse(**result)
+
+
+@router.get("/audit/finding/{finding_id}", response_model=List[schemas.AuditEventResponse])
+def get_finding_audit_events(finding_id: str, db: Session = Depends(get_db)):
+    """
+    Retrieve all audit events directly or indirectly tied to a specific finding.
+    """
+    svc = AuditService()
+    events = svc.get_events(db=db, finding_id=finding_id, order="asc")
+    return events
+
+
+@router.post("/audit/snapshots/{entity_id}", response_model=schemas.AssessmentSnapshotResponse)
+def create_assessment_snapshot(
+    entity_id: str,
+    analysis_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Generates a cryptographically signed, immutable snapshot of the entity's current assessment state.
+    """
+    svc = AuditService()
+    snapshot = svc.create_snapshot(db=db, entity_id=entity_id, analysis_id=analysis_id)
+    return snapshot
 
 

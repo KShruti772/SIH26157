@@ -13,6 +13,7 @@ import EvidenceExplorer from './pages/EvidenceExplorer';
 import EntityDetail from './pages/EntityDetail';
 import Benchmarks from './pages/Benchmarks';
 import ReportGeneration from './pages/ReportGeneration';
+import AuditReplay from './pages/AuditReplay';
 
 const PrivateRoute = ({ children }) => {
   const token = localStorage.getItem('token');
@@ -35,6 +36,8 @@ function App() {
         <Route path="/entity/:id" element={<PrivateRoute><EntityDetail /></PrivateRoute>} />
         <Route path="/benchmarks" element={<PrivateRoute><Benchmarks /></PrivateRoute>} />
         <Route path="/reports" element={<PrivateRoute><ReportGeneration /></PrivateRoute>} />
+        <Route path="/audit-replay" element={<PrivateRoute><AuditReplay /></PrivateRoute>} />
+        <Route path="/audit-replay/:analysisId" element={<PrivateRoute><AuditReplay /></PrivateRoute>} />
       </Routes>
     </BrowserRouter>
   );

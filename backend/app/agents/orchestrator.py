@@ -102,6 +102,24 @@ class AgentOrchestrator:
             model_name=LOCAL_LLM_MODEL if mode == "LOCAL_LLM" else "rules_engine",
         )
 
+        # Record AGENT_RUN_STARTED audit event (Module 9)
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.AGENT_RUN_STARTED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="AgentOrchestrator",
+                entity_id=context.entity_id,
+                analysis_id=context.analysis_id,
+                finding_id=finding_id,
+                agent_run_id=run_id,
+                payload={"mode": mode, "context_hash": context_hash},
+            )
+        except Exception:
+            pass
+
         # 2. Step 1: ASSESSMENT AGENT
         agent_run.state = "ASSESSED"
         db.commit()
@@ -125,6 +143,28 @@ class AgentOrchestrator:
             model_provider=LOCAL_LLM_PROVIDER if mode == "LOCAL_LLM" else "deterministic",
             model_name=LOCAL_LLM_MODEL if mode == "LOCAL_LLM" else "rules_engine",
         )
+
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.AGENT_ASSESSMENT_CREATED,
+                actor_type=ActorType.ASSESSMENT_AGENT,
+                actor_id="AssessmentAgent",
+                entity_id=context.entity_id,
+                analysis_id=context.analysis_id,
+                finding_id=finding_id,
+                agent_run_id=run_id,
+                payload={
+                    "hypothesis": assessment_out.hypothesis,
+                    "confidence": assessment_out.finding_confidence,
+                    "assessment_validity": assessment_out.assessment_validity,
+                    "supporting_evidence": assessment_out.supporting_evidence,
+                },
+            )
+        except Exception:
+            pass
 
         # 3. Step 2: CHALLENGE AGENT
         agent_run.state = "CHALLENGED"
@@ -152,6 +192,27 @@ class AgentOrchestrator:
             model_name=LOCAL_LLM_MODEL if mode == "LOCAL_LLM" else "rules_engine",
         )
 
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.AGENT_CHALLENGE_CREATED,
+                actor_type=ActorType.CHALLENGE_AGENT,
+                actor_id="ChallengeAgent",
+                entity_id=context.entity_id,
+                analysis_id=context.analysis_id,
+                finding_id=finding_id,
+                agent_run_id=run_id,
+                payload={
+                    "challenge_status": challenge_out.challenge_status,
+                    "missing_evidence": challenge_out.missing_evidence,
+                    "alternative_explanations": challenge_out.alternative_explanations,
+                },
+            )
+        except Exception:
+            pass
+
         # 4. Step 3: INVESTIGATION PLANNER
         agent_run.state = "INVESTIGATION_RECOMMENDED"
         db.commit()
@@ -178,6 +239,43 @@ class AgentOrchestrator:
             model_provider=LOCAL_LLM_PROVIDER if mode == "LOCAL_LLM" else "deterministic",
             model_name=LOCAL_LLM_MODEL if mode == "LOCAL_LLM" else "rules_engine",
         )
+
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.AGENT_RECOMMENDATION_CREATED,
+                actor_type=ActorType.INVESTIGATION_PLANNER,
+                actor_id="InvestigationPlanner",
+                entity_id=context.entity_id,
+                analysis_id=context.analysis_id,
+                finding_id=finding_id,
+                agent_run_id=run_id,
+                payload={
+                    "recommended_action": planner_out.recommended_action,
+                    "additional_evidence_requests": planner_out.additional_evidence_requests,
+                },
+            )
+
+            # Record AGENT_RUN_COMPLETED
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.AGENT_RUN_COMPLETED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="AgentOrchestrator",
+                entity_id=context.entity_id,
+                analysis_id=context.analysis_id,
+                finding_id=finding_id,
+                agent_run_id=run_id,
+                payload={
+                    "run_id": run_id,
+                    "final_state": "HUMAN_REVIEW_REQUIRED",
+                    "steps_completed": 3,
+                },
+            )
+        except Exception:
+            pass
 
         # 5. Final State: HUMAN_REVIEW_REQUIRED (Agents cannot finalize assessment)
         agent_run.state = "HUMAN_REVIEW_REQUIRED"

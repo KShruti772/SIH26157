@@ -142,4 +142,28 @@ class AssessmentAssuranceService:
         db.commit()
         db.refresh(assurance_record)
 
+        # Record ASSURANCE_CREATED audit event
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            target_entity = entity_id or (findings[0].entity_id if findings else "CSE-001")
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.ASSURANCE_CREATED,
+                actor_type=ActorType.ANALYTICS_ENGINE,
+                actor_id="AssessmentAssuranceService",
+                entity_id=target_entity,
+                analysis_id=analysis_id or upload_id,
+                payload={
+                    "assurance_id": assurance_id,
+                    "overall_status": overall_status,
+                    "assessment_validity": overall_status,
+                    "coverage_details": coverage_details,
+                    "blind_spots_count": len(blind_spots),
+                    "integrity_status": integrity.get("status", "VERIFIED"),
+                },
+            )
+        except Exception:
+            pass
+
         return assurance_record

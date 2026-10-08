@@ -602,6 +602,29 @@ def generate_supervisory_report_data(
     report_id = f"RPT-{target_entity.id}-{uuid.uuid4().hex[:6].upper()}"
     now = datetime.datetime.utcnow()
 
+    # Record REPORT_GENERATED audit event (Module 9)
+    try:
+        from app.services.audit import AuditService, EventType, ActorType
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.REPORT_GENERATED,
+            actor_type=ActorType.REPORTING_ENGINE,
+            actor_id="ReportingService",
+            entity_id=target_entity.id,
+            analysis_id=analysis_id or (latest_upload.id if latest_upload else "ANL-CURRENT"),
+            report_id=report_id,
+            payload={
+                "report_id": report_id,
+                "findings_count": len(findings),
+                "assessment_validity": assurance.assessment_validity,
+                "confirmed_findings": adjudication["confirmed"],
+                "evidence_requests": len(evidence_requests),
+            },
+        )
+    except Exception:
+        pass
+
     return {
         "report_metadata": {
             "report_id": report_id,

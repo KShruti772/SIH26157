@@ -19,6 +19,8 @@ const FindingDetail = () => {
   const [agentPackage, setAgentPackage] = useState(null);
   const [timeline, setTimeline] = useState([]);
   const [evidenceRequests, setEvidenceRequests] = useState([]);
+  const [auditIntegrity, setAuditIntegrity] = useState(null);
+  const [verifyingIntegrity, setVerifyingIntegrity] = useState(false);
 
   // UI & Loading States
   const [loading, setLoading] = useState(true);
@@ -110,6 +112,24 @@ const FindingDetail = () => {
       setError("Finding not found in supervisory database.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleVerifyIntegrity = async () => {
+    if (!finding) return;
+    setVerifyingIntegrity(true);
+    try {
+      const targetAnalysis = finding.upload_id || finding.id;
+      const res = await api.get(`/audit/integrity/${targetAnalysis}`);
+      setAuditIntegrity(res.data);
+    } catch (err) {
+      console.error("Integrity verification failed", err);
+      setAuditIntegrity({
+        valid: false,
+        error: err.response?.data?.detail || err.message || "Failed to verify hash chain."
+      });
+    } finally {
+      setVerifyingIntegrity(false);
     }
   };
 
@@ -985,13 +1005,69 @@ const FindingDetail = () => {
         </div>
 
         {/* ========================================================================= */}
-        {/* SECTION I: DECISION HISTORY & AUDIT TRAIL */}
+        {/* SECTION I: AUDIT & REPLAY: CRYPTOGRAPHIC CHAIN & DECISION TIMELINE */}
         {/* ========================================================================= */}
-        <div className="p-6 bg-slate-900/60">
-          <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-4 flex items-center">
-            <History className="w-3.5 h-3.5 mr-1.5 text-blue-400" /> I. Decision History & Machine-Readable Audit Timeline
-          </h2>
+        <div className="p-6 bg-slate-900/60 border-t border-slate-700/80">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div className="flex items-center space-x-3">
+              <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center">
+                <History className="w-3.5 h-3.5 mr-1.5 text-blue-400" /> I. Audit & Replay: Cryptographic Ledger & Decision Provenance
+              </h2>
+              <span className="text-[10px] bg-blue-950 text-blue-400 font-mono px-2 py-0.5 rounded border border-blue-800">
+                {timeline.length} Chained Events
+              </span>
+              {auditIntegrity?.valid && (
+                <span className="text-[10px] bg-green-950 text-green-400 font-mono px-2 py-0.5 rounded border border-green-800 flex items-center">
+                  <ShieldCheck className="w-3 h-3 mr-1" /> Chain Verified
+                </span>
+              )}
+            </div>
 
+            {/* Action Buttons: [Verify Integrity] & [Replay Assessment] */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={handleVerifyIntegrity}
+                disabled={verifyingIntegrity}
+                className="flex items-center px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 rounded text-xs font-semibold transition-colors"
+                title="Verify cryptographic SHA-256 hash chaining"
+              >
+                <ShieldCheck className={`w-3.5 h-3.5 mr-1.5 text-green-400 ${verifyingIntegrity ? 'animate-spin' : ''}`} />
+                {verifyingIntegrity ? 'Verifying...' : 'Verify Integrity'}
+              </button>
+
+              <Link
+                to={`/audit-replay/${finding?.upload_id || finding?.id}`}
+                className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold transition-colors"
+                title="Replay entire assessment state deterministically"
+              >
+                <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                Replay Assessment
+              </Link>
+            </div>
+          </div>
+
+          {/* Integrity Verification Feedback Banner */}
+          {auditIntegrity && (
+            <div className={`p-3 rounded-lg border text-xs mb-4 flex items-center justify-between ${
+              auditIntegrity.valid 
+                ? 'bg-green-950/40 border-green-800 text-green-300' 
+                : 'bg-red-950/40 border-red-800 text-red-300'
+            }`}>
+              <div className="flex items-center space-x-2">
+                {auditIntegrity.valid ? <ShieldCheck className="w-4 h-4 text-green-400 shrink-0" /> : <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />}
+                <span>
+                  {auditIntegrity.valid 
+                    ? `Cryptographic hash chain intact across all ${auditIntegrity.total_events} events. Zero tampering detected.`
+                    : auditIntegrity.error || "Cryptographic verification failed."}
+                </span>
+              </div>
+              <span className="text-[10px] font-mono text-slate-400">
+                Analysis: {auditIntegrity.analysis_id || finding?.upload_id}
+              </span>
+            </div>
+          )}
+
+          {/* Chronological Event Timeline */}
           {timeline && timeline.length > 0 ? (
             <div className="relative pl-6 border-l-2 border-slate-700 space-y-4">
               {timeline.map((evt, idx) => (
@@ -999,24 +1075,43 @@ const FindingDetail = () => {
                   <div className="absolute -left-[31px] bg-slate-800 p-1 rounded-full border-2 border-slate-600">
                     <Clock className="w-3.5 h-3.5 text-blue-400" />
                   </div>
-                  <div className="bg-slate-800/80 p-3 rounded border border-slate-700/80 text-xs">
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="font-bold text-white">{evt.action}</span>
+                  <div className="bg-slate-800/80 p-3 rounded border border-slate-700/80 text-xs space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-bold text-white">{evt.action}</span>
+                        {evt.audit_event_type && (
+                          <span className="text-[9px] bg-slate-900 text-slate-400 font-mono px-1.5 py-0.2 rounded border border-slate-700">
+                            {evt.audit_event_type}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[10px] text-slate-400 font-mono">
                         {evt.timestamp ? new Date(evt.timestamp).toLocaleString() : 'Timestamp'}
                       </span>
                     </div>
-                    <p className="text-slate-300 text-[11px] mb-1">{evt.summary}</p>
-                    <div className="flex justify-between items-center text-[10px] text-slate-500 font-mono">
-                      <span>Actor: {evt.actor}</span>
-                      {evt.status && <span>Status: {evt.status}</span>}
+
+                    <p className="text-slate-300 text-[11px]">{evt.summary}</p>
+
+                    <div className="flex flex-wrap justify-between items-center text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-700/50">
+                      <span>Actor: <strong className="text-slate-200">{evt.actor}</strong> ({evt.actor_type || 'SYSTEM'})</span>
+                      {evt.status && <span>Status: <strong className="text-white">{evt.status}</strong></span>}
                     </div>
+
+                    {/* Cryptographic SHA-256 Provenance Snippet */}
+                    {evt.event_hash && (
+                      <div className="text-[9px] font-mono text-slate-500 truncate pt-1">
+                        Hash: <span className="text-slate-400">{evt.event_hash}</span>
+                        {evt.previous_event_hash && (
+                          <span className="ml-3">Prev: <span className="text-slate-400">{evt.previous_event_hash.slice(0, 16)}...</span></span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-slate-500 italic">No previous decisions recorded for this finding.</p>
+            <p className="text-xs text-slate-500 italic">No previous events or decisions recorded for this finding.</p>
           )}
         </div>
 

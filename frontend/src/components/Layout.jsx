@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { 
   LayoutDashboard, Upload, Search, Activity, FileText, 
-  AlertTriangle, Eye, Users, FileBarChart, LogOut 
+  AlertTriangle, Eye, Users, FileBarChart, LogOut, History 
 } from 'lucide-react';
 
 const navItems = [
@@ -12,6 +12,7 @@ const navItems = [
   { path: '/review-queue', label: 'Review Queue', icon: Eye },
   { path: '/benchmarks', label: 'Peer Benchmarking', icon: Users },
   { path: '/reports', label: 'Reports', icon: FileBarChart },
+  { path: '/audit-replay', label: 'Audit & Replay', icon: History },
 ];
 
 const Layout = ({ children }) => {

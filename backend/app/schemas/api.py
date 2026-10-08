@@ -381,4 +381,71 @@ class EntityAssessmentResponse(BaseModel):
     risk: Optional[RiskScoreBase] = None
 
 
+# =========================================================================
+# MODULE 9 — AUDIT & REPLAY SCHEMAS
+# =========================================================================
+
+class AuditEventResponse(BaseModel):
+    id: int
+    event_id: str
+    entity_id: Optional[str] = None
+    event_type: str
+    actor_type: str
+    actor_id: str
+    timestamp: datetime
+    analysis_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    agent_run_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    evidence_request_id: Optional[str] = None
+    report_id: Optional[str] = None
+    event_version: str = "1.0"
+    payload_json: Dict[str, Any] = {}
+    previous_event_hash: Optional[str] = None
+    event_hash: str
+    source_snapshot_hash: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AuditIntegrityResponse(BaseModel):
+    analysis_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    valid: bool
+    total_events: int
+    broken_at_index: Optional[int] = None
+    broken_event_id: Optional[str] = None
+    error: Optional[str] = None
+    chain_hashes: List[str] = []
+
+
+class AuditReplayResponse(BaseModel):
+    analysis_id: str
+    entity_id: str
+    replay_valid: bool
+    chain_integrity: str
+    state_match: bool
+    events_processed: int
+    chain_verification: Optional[Dict[str, Any]] = None
+    mismatches: List[Dict[str, Any]] = []
+    reconstructed_state: Dict[str, Any] = {}
+    persisted_state: Dict[str, Any] = {}
+    replayed_at: str
+
+
+class AssessmentSnapshotResponse(BaseModel):
+    id: str
+    analysis_id: Optional[str] = None
+    entity_id: str
+    snapshot_timestamp: datetime
+    snapshot_hash: str
+    data_json: Dict[str, Any] = {}
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 

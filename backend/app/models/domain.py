@@ -286,3 +286,38 @@ class FindingDecision(Base):
     agent_run_id = Column(String, nullable=True)
 
 
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    event_id = Column(String, unique=True, index=True, nullable=False)
+    entity_id = Column(String, ForeignKey("entities.id"), index=True, nullable=True)
+    event_type = Column(String, index=True, nullable=False)
+    actor_type = Column(String, index=True, nullable=False)
+    actor_id = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    analysis_id = Column(String, index=True, nullable=True)
+    finding_id = Column(String, ForeignKey("findings.id"), index=True, nullable=True)
+    agent_run_id = Column(String, nullable=True, index=True)
+    decision_id = Column(String, nullable=True)
+    evidence_request_id = Column(String, nullable=True, index=True)
+    report_id = Column(String, nullable=True, index=True)
+    event_version = Column(String, default="1.0")
+    payload_json = Column(JSON, default=dict)
+    previous_event_hash = Column(String, nullable=True)
+    event_hash = Column(String, nullable=False, index=True)
+    source_snapshot_hash = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AssessmentSnapshot(Base):
+    __tablename__ = "assessment_snapshots"
+    id = Column(String, primary_key=True, index=True) # SNP-UUID...
+    analysis_id = Column(String, index=True, nullable=True)
+    entity_id = Column(String, ForeignKey("entities.id"), index=True, nullable=False)
+    snapshot_timestamp = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    snapshot_hash = Column(String, nullable=False, index=True)
+    data_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+

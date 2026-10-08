@@ -346,6 +346,51 @@ def process_uploaded_file(
 
     db.commit()
     db.refresh(upload_record)
+
+    # Record Audit Events for Module 9
+    try:
+        from app.services.audit import AuditService, EventType, ActorType
+        audit_svc = AuditService()
+        primary_entity = list(detected_entities)[0] if detected_entities else "CSE-001"
+
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.DATA_INGESTED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="IngestionService",
+            entity_id=primary_entity,
+            analysis_id=upload_id,
+            payload={
+                "upload_id": upload_id,
+                "filename": filename,
+                "file_type": file_type,
+                "dataset_type": dataset_type,
+                "records_received": records_received,
+                "source_hash": upload_record.source_hash,
+            },
+        )
+
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.DATA_VALIDATED,
+            actor_type=ActorType.SYSTEM,
+            actor_id="ValidationService",
+            entity_id=primary_entity,
+            analysis_id=upload_id,
+            payload={
+                "upload_id": upload_id,
+                "status": status,
+                "records_valid": records_valid,
+                "records_rejected": records_rejected,
+                "warnings_count": len(all_warnings),
+                "errors_count": len(all_errors),
+                "entities_detected": list(detected_entities),
+            },
+        )
+    except Exception as e:
+        # Prevent audit event failure from breaking ingestion pipeline
+        pass
+
     return upload_record
 
 

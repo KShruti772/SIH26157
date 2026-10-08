@@ -316,7 +316,58 @@ Module 8 transforms underlying evidence, analytics, assessment assurance, and hu
 
 ---
 
-## 10. SOC Datasets & Public Benchmarks
+## 10. Module 9: Cryptographic Audit & Replay Engine
+
+Module 9 implements an offline, append-oriented, **tamper-evident cryptographic audit chain** and deterministic supervisory replay engine. It answers the fundamental supervisory question: *"Why did this assessment occur, what evidence and system actions led to it, what did the agents recommend, what did the human examiner decide, and can the final assessment state be mathematically reconstructed?"*
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        CRYPTOGRAPHIC AUDIT & REPLAY SUBSYSTEM                          │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ DATA INGESTION ──► ANALYTICS ──► ASSURANCE ──► AGENT RUNS ──► HUMAN ADJUDICATION       │
+│        │                 │            │             │                 │                │
+│        ▼                 ▼            ▼             ▼                 ▼                │
+│  [DATA_INGESTED]   [FINDING_CRTD] [ASSURANCE] [AGENT_ASSESS]  [HUMAN_DECISION_CRTD]    │
+│        │                 │            │             │                 │                │
+│        └─────────────────┴────────────┼─────────────┴─────────────────┘                │
+│                                       ▼                                                │
+│                 TAMPER-EVIDENT CRYPTOGRAPHIC AUDIT CHAIN (SHA-256)                     │
+│                (Canonical RFC-8785 JSON · Sequential Hash Linkage)                     │
+│                                       │                                                │
+│                   ┌───────────────────┴───────────────────┐                            │
+│                   ▼                                       ▼                            │
+│     ASSESSMENT SNAPSHOTS (SHA-256)          DETERMINISTIC REPLAY ENGINE                │
+│     (Point-in-Time State Capture)      (Replay Events == Persisted State)              │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Capabilities
+1. **Append-Only Audit Ledger (`backend/app/models/domain.py`)**:
+   - `AuditEvent` records with canonical event identifiers, entity references, actor classification, timestamps, and structured payloads.
+   - Strictly controlled event vocabulary: `DATA_INGESTED`, `DATA_VALIDATED`, `ANALYSIS_STARTED`, `ANALYSIS_COMPLETED`, `FINDING_CREATED`, `FINDING_UPDATED`, `ASSURANCE_CREATED`, `ASSURANCE_UPDATED`, `AGENT_RUN_STARTED`, `AGENT_ASSESSMENT_CREATED`, `AGENT_CHALLENGE_CREATED`, `AGENT_RECOMMENDATION_CREATED`, `AGENT_RUN_COMPLETED`, `EVIDENCE_REQUEST_CREATED`, `EVIDENCE_REQUEST_UPDATED`, `HUMAN_DECISION_CREATED`, `REPORT_GENERATED`, `SNAPSHOT_CREATED`, `REPLAY_STARTED`, `REPLAY_COMPLETED`.
+   - Distinct actor tracking: `SYSTEM`, `ANALYTICS_ENGINE`, `ASSESSMENT_AGENT`, `CHALLENGE_AGENT`, `INVESTIGATION_PLANNER`, `HUMAN_EXAMINER`, `REPORTING_ENGINE`, `REPLAY_ENGINE`.
+2. **Canonical Hashing & Cryptographic Chaining (`backend/app/services/audit.py`)**:
+   - Deterministic canonical JSON serialization conforming to RFC-8785 conventions (sorted dictionary keys, normalized whitespace separators `(',', ':')`, ISO-8601 UTC timestamps, and UTF-8 encoding).
+   - Sequential SHA-256 hash chaining: each event references the previous event's `event_hash` (`previous_event_hash = null` for stream genesis).
+   - Tamper-evident verification: `verify_chain(...)` isolates exact event index, ID, and payload discrepancy if history is modified.
+3. **Assessment Snapshots (`AssessmentSnapshot`)**:
+   - Deterministic point-in-time state capture across entity profile, active findings, capability statuses, evidence limitations, agent conclusions, human decisions, and open evidence requests.
+   - Computed `snapshot_hash` references evidence record IDs without duplicating raw underlying datasets.
+4. **Deterministic Replay Engine (`ReplayEngine`)**:
+   - Offline, rule-based state reconstruction without LLM non-determinism.
+   - Validates chronological ordering, checks cryptographic hash links, applies state transitions, and compares reconstructed state directly against SQLite database records.
+   - Returns structured evaluation metrics: `replay_valid`, `chain_integrity` (`VERIFIED`), `state_match` (`True`), `events_processed`, and `mismatches`.
+5. **Human Adjudication Preservation & Historical Immutability**:
+   - Historical audit records cannot be overwritten, modified, or deleted by agents.
+   - Any modification or human reconsideration appends a new `HUMAN_DECISION_CREATED` or `FINDING_UPDATED` event to the chain, preserving complete supervisory provenance.
+6. **Audit & Replay UI (`frontend/src/pages/AuditReplay.jsx`)**:
+   - Dedicated supervisory workspace showing analysis ID, entity ID, chained event count, chain integrity badge, replay validity, and 100% state match confirmation.
+   - Side-by-side comparative inspection of reconstructed vs live persisted database state.
+   - Raw cryptographic event stream inspector displaying SHA-256 hashes, previous hash linkage, and formatted JSON payloads.
+
+---
+
+## 11. SOC Datasets & Public Benchmarks
 
 SAT-SA is designed to work with periodic exports from Security Operations Centers. For evaluation, benchmarking, and development, the project references two public SOC research datasets:
 
@@ -434,9 +485,17 @@ SAT-SA is architected with strict air-gapped constraints:
 
 ---
 
-## 14. Limitations & Planned Roadmap
+## 14. Implemented Milestone Status
 
-- **Audit & Replay Engine (Module 9)**: Step-by-step analytical replay of agent and supervisory decisions.
+- **Module 1 — CSE Data Submission**: Complete (100%)
+- **Module 2 — Data Validation & Normalization**: Complete (100%)
+- **Module 3 — Evidence Reconstruction**: Complete (100%)
+- **Module 4 — Supervisory Analytics Engine**: Complete (100%)
+- **Module 5 — Assessment Assurance**: Complete (100%)
+- **Module 6 — Local Agentic AI**: Complete (100%)
+- **Module 7 — Human Examiner Workspace**: Complete (100%)
+- **Module 8 — Reporting & Supervisory Dashboard**: Complete (100%)
+- **Module 9 — Audit & Replay Engine**: Complete (100%)
 
 ---
 

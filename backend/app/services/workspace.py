@@ -162,6 +162,32 @@ def record_human_decision(
     db.refresh(finding)
     db.refresh(decision_rec)
 
+    # Record HUMAN_DECISION_CREATED audit event (Module 9)
+    try:
+        from app.services.audit import AuditService, EventType, ActorType
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.HUMAN_DECISION_CREATED,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=reviewer or "Human Examiner",
+            entity_id=finding.entity_id,
+            analysis_id=finding.upload_id,
+            finding_id=finding.id,
+            decision_id=str(decision_rec.id),
+            agent_run_id=agent_run.id if agent_run else None,
+            payload={
+                "decision": decision_norm,
+                "notes": notes,
+                "rationale": rationale,
+                "rejection_reason": rejection_reason,
+                "modified_assessment": modified_assessment,
+                "finding_id": finding.id,
+            },
+        )
+    except Exception:
+        pass
+
     return {
         "finding_id": finding.id,
         "decision": decision_norm,
@@ -200,7 +226,7 @@ def create_evidence_request(
     req_obj = domain.EvidenceRequest(
         id=req_id,
         finding_id=finding_id,
-        analysis_id=None,
+        analysis_id=finding.upload_id,
         entity_id=finding.entity_id,
         requested_by=requested_by or "Human Examiner",
         requested_at=now,
@@ -245,6 +271,31 @@ def create_evidence_request(
 
     db.commit()
     db.refresh(req_obj)
+
+    # Record EVIDENCE_REQUEST_CREATED audit event (Module 9)
+    try:
+        from app.services.audit import AuditService, EventType, ActorType
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.EVIDENCE_REQUEST_CREATED,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=requested_by or "Human Examiner",
+            entity_id=finding.entity_id,
+            analysis_id=finding.upload_id,
+            finding_id=finding_id,
+            evidence_request_id=req_id,
+            payload={
+                "request_id": req_id,
+                "request_type": req_type_norm,
+                "reason": reason,
+                "priority": priority.upper() if priority else "HIGH",
+                "finding_id": finding_id,
+            },
+        )
+    except Exception:
+        pass
+
     return req_obj
 
 
@@ -274,8 +325,34 @@ def update_evidence_request_status(
     finding = db.query(domain.Finding).filter(domain.Finding.id == req_obj.finding_id).first()
     if finding and status_norm in ("RECEIVED", "RESOLVED"):
         finding.decision_status = "UNDER_REVIEW"
-        finding.status = "Under Review"
+        finding.status = "Under Supervisory Review"
 
+    db.commit()
+    db.refresh(req_obj)
+
+    # Record EVIDENCE_REQUEST_UPDATED audit event (Module 9)
+    try:
+        from app.services.audit import AuditService, EventType, ActorType
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.EVIDENCE_REQUEST_UPDATED,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=reviewer or "Human Examiner",
+            entity_id=req_obj.entity_id,
+            analysis_id=req_obj.analysis_id,
+            finding_id=req_obj.finding_id,
+            evidence_request_id=req_obj.id,
+            payload={
+                "request_id": req_obj.id,
+                "status": status_norm,
+                "response_notes": response_notes,
+            },
+        )
+    except Exception:
+        pass
+
+    # Record audit log
     AgentAuditTracker.record_step(
         db=db,
         run_id=request_id,
@@ -297,18 +374,79 @@ def update_evidence_request_status(
 def get_finding_unified_history(finding_id: str, db: Session) -> List[Dict[str, Any]]:
     """
     Reconstruct unified, chronological audit and decision history for a finding.
-    Combines:
-    - Finding creation
-    - Assurance evaluations
-    - Agent analyses
-    - Evidence requests
-    - Human examiner decisions and modifications
+    Connects to the cryptographic AuditEvent ledger while maintaining full backwards compatibility.
     """
     finding = db.query(domain.Finding).filter(domain.Finding.id == finding_id).first()
     if not finding:
         raise ValueError(f"Finding with ID '{finding_id}' not found.")
 
-    timeline: List[Dict[str, Any]] = []
+    # Check if dedicated AuditEvent records exist for this finding
+    audit_evts = db.query(domain.AuditEvent).filter(
+        domain.AuditEvent.finding_id == finding_id
+    ).order_by(domain.AuditEvent.id.asc()).all()
+
+    if audit_evts:
+        timeline: List[Dict[str, Any]] = []
+        has_created = False
+        for evt in audit_evts:
+            if evt.event_type == "FINDING_CREATED":
+                has_created = True
+            payload = evt.payload_json or {}
+            summary = payload.get("notes") or payload.get("reason") or payload.get("hypothesis") or payload.get("type") or f"{evt.event_type} by {evt.actor_id}"
+            action = f"{evt.event_type.replace('_', ' ').title()}"
+            hist_evt_type = evt.event_type
+
+            if evt.event_type == "FINDING_CREATED":
+                action = f"Rule Trigger: {payload.get('analytic_rule') or finding.type}"
+                summary = finding.description
+                hist_evt_type = "FINDING_CREATED"
+            elif evt.event_type == "HUMAN_DECISION_CREATED":
+                action = f"Examiner Action: {payload.get('decision')}"
+                hist_evt_type = f"HUMAN_DECISION_{payload.get('decision', 'APPLIED')}"
+            elif evt.event_type == "EVIDENCE_REQUEST_CREATED":
+                action = f"Requested Evidence: {payload.get('request_type')}"
+                hist_evt_type = "EVIDENCE_REQUESTED"
+
+            timeline.append({
+                "event_id": evt.event_id,
+                "timestamp": evt.timestamp,
+                "event_type": hist_evt_type,
+                "audit_event_type": evt.event_type,
+                "actor": evt.actor_id or evt.actor_type,
+                "actor_type": evt.actor_type,
+                "action": action,
+                "status": payload.get("decision") or payload.get("status") or "SUCCESS",
+                "summary": summary,
+                "details": payload,
+                "event_hash": evt.event_hash,
+                "previous_event_hash": evt.previous_event_hash,
+            })
+
+        if not has_created:
+            timeline.insert(0, {
+                "event_id": f"EVT-CREATE-{finding.id}",
+                "timestamp": finding.created_at or datetime.datetime.utcnow(),
+                "event_type": "FINDING_CREATED",
+                "actor": "Deterministic Analytics Engine",
+                "actor_type": "ANALYTICS_ENGINE",
+                "action": f"Rule Trigger: {finding.analytic_rule or finding.type}",
+                "status": "INITIAL_DETECTION",
+                "summary": finding.description or "Finding created by analytics engine.",
+                "details": {
+                    "severity": finding.severity,
+                    "confidence": finding.confidence,
+                    "category": finding.category,
+                    "evidence_count": len(finding.evidence_ids or []),
+                },
+                "event_hash": None,
+                "previous_event_hash": None,
+            })
+
+        timeline.sort(key=lambda x: x["timestamp"] if isinstance(x["timestamp"], datetime.datetime) else datetime.datetime.min)
+        return timeline
+
+    # Fallback to legacy reconstruct if no AuditEvent records exist yet
+    timeline = []
 
     # 1. Finding Created Event
     timeline.append({

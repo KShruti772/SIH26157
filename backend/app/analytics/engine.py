@@ -70,6 +70,27 @@ class SupervisoryAnalyticsEngine:
                 db.add(domain.Entity(id=eid, name=f"Critical Sector Entity {eid}", sector="Critical Infrastructure", assessment_period="2026-Q3"))
         db.commit()
 
+        # Record ANALYSIS_STARTED audit event
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            primary_entity = entity_ids[0] if entity_ids else "CSE-001"
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.ANALYSIS_STARTED,
+                actor_type=ActorType.ANALYTICS_ENGINE,
+                actor_id="SupervisoryAnalyticsEngine",
+                entity_id=primary_entity,
+                analysis_id=analysis_id or upload_id,
+                payload={
+                    "analysis_id": analysis_id or upload_id,
+                    "entities_count": len(entity_ids),
+                    "entities": entity_ids,
+                },
+            )
+        except Exception:
+            pass
+
         # Group records by entity
         entity_data: Dict[str, Dict[str, Any]] = {}
         for eid in entity_ids:
@@ -186,6 +207,33 @@ class SupervisoryAnalyticsEngine:
 
         db.commit()
 
+        # Record FINDING_CREATED audit events for each finding
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            for f in all_findings:
+                audit_svc.record_event(
+                    db=db,
+                    event_type=EventType.FINDING_CREATED,
+                    actor_type=ActorType.ANALYTICS_ENGINE,
+                    actor_id="SupervisoryAnalyticsEngine",
+                    entity_id=f.entity_id,
+                    analysis_id=analysis_id or upload_id or f.upload_id,
+                    finding_id=f.id,
+                    payload={
+                        "finding_id": f.id,
+                        "type": f.type,
+                        "category": f.category,
+                        "severity": f.severity,
+                        "confidence": f.confidence,
+                        "analytic_rule": f.analytic_rule,
+                        "evidence_ids": f.evidence_ids or [],
+                        "risk_contribution": f.risk_contribution,
+                    },
+                )
+        except Exception:
+            pass
+
         # 8. Evaluate Assessment Assurance (Module 5)
         report("evaluating_assurance", "Evaluating assessment assurance, evidence coverage & integrity", 98)
         assurance_rec = self.assurance_service.evaluate_assurance(
@@ -194,6 +242,34 @@ class SupervisoryAnalyticsEngine:
             upload_id=upload_id,
             entity_id=entity_ids[0] if len(entity_ids) == 1 else None,
         )
+
+        # Record ANALYSIS_COMPLETED audit event
+        try:
+            from app.services.audit import AuditService, EventType, ActorType
+            audit_svc = AuditService()
+            primary_entity = entity_ids[0] if entity_ids else "CSE-001"
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.ANALYSIS_COMPLETED,
+                actor_type=ActorType.ANALYTICS_ENGINE,
+                actor_id="SupervisoryAnalyticsEngine",
+                entity_id=primary_entity,
+                analysis_id=analysis_id or upload_id,
+                payload={
+                    "analysis_id": analysis_id or upload_id,
+                    "entities_analyzed": len(entity_ids),
+                    "findings_count": len(all_findings),
+                    "assessment_validity": assurance_rec.overall_status,
+                    "categories": {
+                        "execution_gaps": sum(1 for f in all_findings if f.category == "execution_gap"),
+                        "negative_space": sum(1 for f in all_findings if f.category == "negative_space"),
+                        "anomalies": sum(1 for f in all_findings if f.category == "anomaly"),
+                        "peer_deviations": sum(1 for f in all_findings if f.category == "peer_deviation"),
+                    },
+                },
+            )
+        except Exception:
+            pass
 
         report("completed", "Supervisory analytics pipeline completed successfully", 100)
 
