@@ -1,0 +1,167 @@
+# ============================================================
+# SAT-SA — SIH26157
+# Git Ignore Configuration
+# ============================================================
+
+# macOS / OS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+.venv-*/
+venv-*/
+backend/venv/
+
+# Python packaging & build
+/build/
+*.egg-info/
+.eggs/
+
+# Testing & linting
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.next/
+out/
+dist/
+frontend/dist/
+.cache/
+.parcel-cache/
+.turbo/
+
+# Environment / secrets
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+credentials/
+config/secrets.*
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+backend/data/*.db
+
+# ML / AI model files & weights (root models directory & binary weights)
+/models/*
+!/models/.gitkeep
+checkpoints/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.bin
+
+# Vector stores & embeddings
+vectorstore/
+vector_store/
+embeddings/
+.faiss/
+*.faiss
+*.index
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Temporary & backup files
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.save
+*.bak
+
+# IDE / Editors
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.iml
+
+# Large / raw / generated datasets
+data/raw/
+data/downloads/
+data/cache/
+data/processed/
+data/generated/
+data/public/salad/
+data/public/ai_soc/
+data/public/*.csv
+data/public/*.txt
+data/public/*.parquet
+data/public/*.json
+data/public/*.zip
+data/public/*.tar.gz
+
+# Generated reports & outputs
+reports/generated/
+outputs/
+artifacts/
+
+# OS / archives
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# Docker
+docker-data/
+docker-volumes/
+
+# Keep directory structure
+!data/.gitkeep
+!data/public/.gitkeep
+!data/synthetic/.gitkeep
+!models/.gitkeep
+!docs/.gitkeep
+!sample_data/.gitkeep
+!notebooks/.gitkeep
+!reports/.gitkeep
