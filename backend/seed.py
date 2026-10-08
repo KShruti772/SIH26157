@@ -2,6 +2,7 @@ import random
 from datetime import datetime, timedelta
 from app.database import engine, Base, SessionLocal
 from app.models import domain
+from app.analytics.engine import SupervisoryAnalyticsEngine
 
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
@@ -9,148 +10,156 @@ Base.metadata.create_all(bind=engine)
 def seed():
     db = SessionLocal()
     
-    # 1. Create 10 CSEs
+    # 1. Create 10 Critical Sector Entities (CSEs)
     entities = []
+    sectors = ["Energy", "Finance", "Telecom", "Transport", "Govt", "Defense", "Healthcare", "IT", "Power", "Banking"]
     for i in range(1, 11):
         e = domain.Entity(
             id=f"CSE-{i:03d}",
             name=f"Critical Sector Entity {i}",
-            sector=random.choice(["Energy", "Finance", "Telecom", "Transport", "Govt"]),
+            sector=sectors[i - 1],
             assessment_period="2026-Q3"
         )
         entities.append(e)
         db.add(e)
     db.commit()
 
-    # Create dummy alerts and cases
     now = datetime.utcnow()
-    alerts = []
-    cases = []
-    assets = []
     
-    # Generate standard data
+    # 2. Seed Assets for all entities
     for entity in entities:
-        # Create some assets
-        for j in range(5):
+        is_cse_005 = (entity.id == "CSE-005")
+        for j in range(6):
+            crit = "Critical" if j < 2 else ("High" if j < 4 else "Medium")
+            # CSE-005 has dormant critical assets with missing telemetry
+            has_telem = False if (is_cse_005 and crit in ["Critical", "High"]) else True
             a = domain.Asset(
                 id=f"AST-{entity.id}-{j}",
                 entity_id=entity.id,
-                type=random.choice(["Server", "Endpoint", "Network", "Cloud"]),
-                criticality=random.choice(["High", "Critical", "Medium"]),
-                has_telemetry=True
+                type="Server" if j % 2 == 0 else "Endpoint",
+                criticality=crit,
+                has_telemetry=has_telem,
             )
-            assets.append(a)
             db.add(a)
+
+    # 3. Seed Alerts and Cases for all entities
+    for entity in entities:
+        is_cse_003 = (entity.id == "CSE-003")
+        is_cse_005 = (entity.id == "CSE-005")
+
+        for k in range(35):
+            alert_id = f"AL-{entity.id}-{k:03d}"
+            sev = random.choice(["Low", "Medium", "High", "Critical"]) if not is_cse_003 else ("Critical" if k < 15 else "Low")
             
-        # Create alerts
-        for k in range(50):
+            # Normal peers escalate critical alerts ~85% of the time
+            is_crit = (sev == "Critical")
+            if is_cse_003 and is_crit:
+                # CSE-003 operational gap: closed rapidly without escalation
+                escalated = False
+                inv_dur = 4.5
+                close_dur = 5.5
+                inv_started = True
+                ack = True
+            else:
+                escalated = True if is_crit else (random.random() > 0.6)
+                inv_dur = random.uniform(25, 65)
+                close_dur = inv_dur + random.uniform(10, 40)
+                inv_started = True
+                ack = True
+
+            gen_time = now - timedelta(days=random.randint(1, 28), hours=random.randint(0, 23))
+            close_time = gen_time + timedelta(minutes=close_dur)
+
             alert = domain.Alert(
-                id=f"AL-{entity.id}-{k}",
+                id=alert_id,
                 entity_id=entity.id,
-                timestamp=now - timedelta(days=random.randint(1, 30)),
-                severity=random.choice(["Low", "Medium", "High", "Critical"]),
-                category=random.choice(["Malware", "Intrusion", "DDoS", "Exfiltration"]),
-                asset_id=assets[0].id,
-                acknowledged=True,
-                investigation_started=True,
-                escalated=False,
-                closed_at=now,
-                disposition="False Positive",
-                investigation_duration_mins=random.uniform(10, 120),
-                closure_duration_mins=random.uniform(15, 130)
+                timestamp=gen_time,
+                severity=sev,
+                category=random.choice(["Exfiltration", "Intrusion", "Malware", "Privilege Escalation"]),
+                asset_id=f"AST-{entity.id}-0",
+                acknowledged=ack,
+                investigation_started=inv_started,
+                escalated=escalated,
+                closed_at=close_time,
+                disposition="Resolved" if escalated else "False Positive",
+                investigation_duration_mins=inv_dur,
+                closure_duration_mins=close_dur,
             )
-            alerts.append(alert)
             db.add(alert)
-            
-    # Inject Scenarios
-    
-    # CSE-003: Critical alerts closed without escalation
-    for k in range(10):
-        alert = domain.Alert(
-            id=f"AL-CSE-003-CRIT-{k}",
+
+            # Add linked Case for investigated alerts
+            if inv_started and random.random() > 0.3:
+                case = domain.Case(
+                    id=f"CASE-{entity.id}-{k:03d}",
+                    entity_id=entity.id,
+                    alert_id=alert_id,
+                    created_at=gen_time + timedelta(minutes=2),
+                    investigator=f"Analyst-{random.randint(1, 8)}",
+                    investigation_duration=inv_dur,
+                    escalation_status=escalated,
+                    closure_time=close_time,
+                    closure_reason="Disposition reached",
+                    evidence_count=random.randint(1, 4),
+                )
+                db.add(case)
+
+    db.commit()
+    print("Realistic operational records staged in database.")
+
+    # 4. Run real Supervisory Analytics Engine over staged records
+    print("Executing Supervisory Analytics Engine over staged operational records...")
+    engine_inst = SupervisoryAnalyticsEngine()
+    summary = engine_inst.run(db=db)
+    print(f"Supervisory Analytics Engine complete! Generated {summary['findings_count']} findings across {summary['entities_analyzed']} entities.")
+
+    # Also add aliased finding entries for EG-0042 and NS-0015 for backward compatibility with legacy direct links
+    existing_eg = db.query(domain.Finding).filter(domain.Finding.id == "EG-CSE-003-FAST-CRIT").first()
+    if existing_eg:
+        db.add(domain.Finding(
+            id="EG-0042",
             entity_id="CSE-003",
-            timestamp=now - timedelta(days=random.randint(1, 10)),
-            severity="Critical",
-            category="Exfiltration",
-            asset_id="AST-CSE-003-0",
-            acknowledged=True,
-            investigation_started=True,
-            escalated=False, # The issue!
-            closed_at=now,
-            disposition="Resolved",
-            investigation_duration_mins=5.0,
-            closure_duration_mins=6.0
-        )
-        db.add(alert)
-        
-    f1 = domain.Finding(
-        id="EG-0042",
-        entity_id="CSE-003",
-        type="Critical alerts closed without escalation",
-        category="execution_gap",
-        severity="HIGH",
-        confidence=0.91,
-        description="Multiple critical severity alerts were closed very quickly without being escalated to higher tiers.",
-        rationale="Critical alerts should normally be escalated. The entity shows a significant deviation from peer behaviour.",
-        evidence_ids=["AL-CSE-003-CRIT-0", "AL-CSE-003-CRIT-1"],
-        risk_contribution=18.0,
-        recommended_action="Review critical alerts and escalation decisions."
-    )
-    db.add(f1)
-    
-    r1 = domain.RiskScore(
-        entity_id="CSE-003",
-        overall_score=72,
-        execution_gap_risk=21,
-        negative_space_risk=15,
-        investigation_risk=12,
-        escalation_risk=10,
-        anomaly_risk=6,
-        peer_deviation_risk=5,
-        monitoring_coverage_risk=3
-    )
-    db.add(r1)
-    
-    rev1 = domain.ReviewItem(
-        finding_id="EG-0042",
-        priority_score=94.0,
-        status="Pending"
-    )
-    db.add(rev1)
+            type="Critical alerts closed without escalation",
+            category="execution_gap",
+            severity=existing_eg.severity,
+            confidence=existing_eg.confidence,
+            description=existing_eg.description,
+            rationale=existing_eg.rationale,
+            evidence_ids=existing_eg.evidence_ids,
+            risk_contribution=existing_eg.risk_contribution,
+            recommended_action=existing_eg.recommended_action,
+            status="Requires Review",
+            analytic_rule=existing_eg.analytic_rule,
+            details=existing_eg.details,
+            assessment_validity=existing_eg.assessment_validity or "CAUTION",
+            validity_rationale=existing_eg.validity_rationale or "Evidence supports specific finding, but complete operational population remains unverified.",
+        ))
+        db.add(domain.ReviewItem(finding_id="EG-0042", priority_score=94.0, status="Pending", notes="Demo baseline review item"))
 
-    # CSE-005: Critical assets have missing telemetry
-    f2 = domain.Finding(
-        id="NS-0015",
-        entity_id="CSE-005",
-        type="Missing Telemetry on Critical Assets",
-        category="negative_space",
-        severity="CRITICAL",
-        confidence=0.95,
-        description="Critical assets found with no corresponding log telemetry.",
-        rationale="Critical assets must be monitored continuously.",
-        evidence_ids=[],
-        risk_contribution=25.0,
-        recommended_action="Validate logging configuration on critical assets."
-    )
-    db.add(f2)
-    db.add(domain.ReviewItem(finding_id="NS-0015", priority_score=88.0))
-    db.add(domain.RiskScore(
-        entity_id="CSE-005", overall_score=85, execution_gap_risk=10, negative_space_risk=40,
-        investigation_risk=10, escalation_risk=5, anomaly_risk=10, peer_deviation_risk=5, monitoring_coverage_risk=5
-    ))
-
-    # Add random risk scores for the rest
-    for i in range(1, 11):
-        eid = f"CSE-{i:03d}"
-        if eid not in ["CSE-003", "CSE-005"]:
-            db.add(domain.RiskScore(
-                entity_id=eid, overall_score=random.randint(10, 45), execution_gap_risk=5, negative_space_risk=5,
-                investigation_risk=5, escalation_risk=5, anomaly_risk=random.randint(1,5), peer_deviation_risk=0, monitoring_coverage_risk=random.randint(1,5)
-            ))
+    existing_ns = db.query(domain.Finding).filter(domain.Finding.id == "NS-CSE-005-CRIT-ASSET").first()
+    if existing_ns:
+        db.add(domain.Finding(
+            id="NS-0015",
+            entity_id="CSE-005",
+            type="Missing Telemetry on Critical Assets",
+            category="negative_space",
+            severity=existing_ns.severity,
+            confidence=existing_ns.confidence,
+            description=existing_ns.description,
+            rationale=existing_ns.rationale,
+            evidence_ids=existing_ns.evidence_ids,
+            risk_contribution=existing_ns.risk_contribution,
+            recommended_action=existing_ns.recommended_action,
+            status="Requires Review",
+            analytic_rule=existing_ns.analytic_rule,
+            details=existing_ns.details,
+            assessment_validity=existing_ns.assessment_validity or "CAUTION",
+            validity_rationale=existing_ns.validity_rationale or "Evidence supports specific finding, but complete operational population remains unverified.",
+        ))
+        db.add(domain.ReviewItem(finding_id="NS-0015", priority_score=88.0, status="Pending", notes="Demo baseline review item"))
 
     db.commit()
     db.close()
-    print("Database seeded with synthetic data.")
+    print("Database seeding and analytical discovery completed.")
 
 if __name__ == "__main__":
     seed()

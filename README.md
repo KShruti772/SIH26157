@@ -10,6 +10,8 @@
 **SAT-SA (Supervisory Analytics Tool for SOC Assessment)** is a human-in-the-loop supervisory analytics platform engineered for SOC leads, auditors, and security supervisors. Unlike traditional SIEMs or real-time intrusion detection systems, SAT-SA focuses on **post-operational supervisory oversight**—evaluating periodic SOC alert dumps, case-management records, and asset inventories to identify systemic security operational risks.
 
 SAT-SA enables supervisors to:
+- Ingest, validate, and normalize multi-format SOC dumps (CSV, TSV, TXT, JSON, JSONL).
+- Profile data quality, detect malformed rows, missing timestamps, and duplicate identifiers.
 - Detect **Execution Gaps** (e.g., critical alerts closed prematurely without proper escalation or investigation).
 - Identify **Negative Space** (e.g., high-criticality assets lacking mandatory telemetry or logging).
 - Uncover **Anomalies & Peer Deviations** (e.g., entities or analysts with abnormal resolution durations or disposition rates).
@@ -20,34 +22,33 @@ SAT-SA enables supervisors to:
 
 ---
 
-## 2. Core Capabilities & Architecture
+## 2. Ingestion & Normalization Architecture (Modules 1 & 2)
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        SAT-SA Supervisory System                       │
-├───────────────────────────────┬────────────────────────────────────────┤
-│     Frontend (React + Vite)   │          Backend (FastAPI)             │
-├───────────────────────────────┼────────────────────────────────────────┤
-│ • Executive Dashboard         │ • RESTful API Endpoints (`/api/*`)     │
-│ • Analysis Pipeline Trigger   │ • Multi-stage Analysis Workflow        │
-│ • Findings & Risk Explorer    │ • SQLAlchemy ORM & Schema Validation   │
-│ • Review Queue with Triage    │ • SQLite Local Storage Engine          │
-│ • Evidence Timeline Inspector │ • Synthetic Scenario Ingestion Engine  │
-│ • Statistical Peer Benchmarks │ • Audit Logging & Report Generation    │
-│ • SOC Export Upload & Preview │ • Completely Air-Gapped / Offline      │
-└───────────────────────────────┴────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                REAL INGESTION PIPELINE                                 │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Multipart Ingestion  ──► Safe stream reader with format & size verification         │
+│ 2. Schema Detection     ──► Classifies dataset as Alerts, Assets, or Cases             │
+│ 3. Canonical Adapters   ──► Maps external/vendor aliases to canonical SAT-SA fields    │
+│ 4. Normalization Engine ──► Column snake_casing, Severity, Booleans, UTC Timestamps   │
+│ 5. Quality Profiling    ──► Real calculations: missing fields, duplicates, invalid ts  │
+│ 6. SQLite Persistence   ──► Atomically writes DatasetUpload and domain records         │
+│ 7. Isolated Preview     ──► Previews exact records bound to the upload submission      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Modules
-1. **Executive Dashboard (`/`)**: High-level overview of entities analyzed, findings generated, risk distributions, and pending review counts.
-2. **Analysis Pipeline (`/analysis`)**: Simulated 11-stage batch analytics pipeline (data validation, normalization, profiling, alert/case analysis, gap detection, anomaly scoring, risk computation).
-3. **Findings & Gaps (`/findings`, `/findings/:id`)**: Drilldown into specific execution gaps, negative-space findings, and peer deviations with confidence scores and recommended remediation.
-4. **Human-in-the-Loop Review Queue (`/review-queue`)**: Priority-ranked workflow allowing supervisors to review, annotate, and update status on high-risk findings.
-5. **Entity Profiling (`/entities/:id`)**: Comprehensive breakdown of individual Critical Sector Entities (CSEs), alert histories, and multi-dimensional risk vectors.
-6. **Evidence Explorer (`/evidence/:findingId`)**: Forensic timeline correlation linking findings to underlying alerts, cases, assets, and timestamps.
-7. **Peer Benchmarking (`/benchmarks`)**: Statistical peer comparisons (medians, averages, percentiles, deviations) across operational metrics.
-8. **Data Upload & Preview (`/upload`, `/upload/:id/preview`)**: Interface for uploading periodic SOC log dumps (CSV/JSON) and inspecting data schemas.
-9. **Supervisory Reporting (`/reports`)**: Report compilation and export for compliance and auditing.
+### Canonical Schemas
+1. **Alerts Schema**: `alert_id` (Required), `timestamp` (Required, UTC), `severity` (`Critical`, `High`, `Medium`, `Low`), `category`, `asset_id`, `acknowledged`, `investigation_started`, `escalated`, `closed_at`, `disposition`, `investigation_duration_mins`, `closure_duration_mins`.
+2. **Assets Schema**: `asset_id` (Required), `entity_id`, `type`, `criticality` (`Critical`, `High`, `Medium`, `Low`), `has_telemetry` (`True`/`False`).
+3. **Cases Schema**: `case_id` (Required), `entity_id`, `alert_id`, `created_at` (Required, UTC), `investigator`, `investigation_duration`, `escalation_status`, `closure_time`, `closure_reason`, `evidence_count`.
+
+### Normalization Policies
+- **Column Names**: Converted to canonical lowercase snake_case (e.g., `"Alert ID"` -> `"alert_id"`).
+- **Severity**: Canonicalized to `Critical`, `High`, `Medium`, `Low`, or `Unknown` from vendor variations (`"crit"`, `"Sev 1"`, `"1"`, `"informational"`, etc.).
+- **Booleans**: Canonicalized from `1/0`, `yes/no`, `true/false`, `t/f`, `escalate/none`.
+- **Timestamps**: Converted to UTC datetime objects; timezone-naive timestamps assume UTC and record a `timezone_assumed_utc` quality notice.
+- **Duplicates**: Uniqueness enforced on primary IDs per submission; default policy retains the first valid record and records duplicates in the quality report.
 
 ---
 
@@ -68,6 +69,7 @@ SAT-SA enables supervisors to:
   - Pydantic v2 (Data validation & schemas)
   - SQLite (Local embedded relational database)
   - Pandas (Data analysis & inspection)
+  - Pytest (Automated test suite)
 
 ---
 
@@ -80,14 +82,20 @@ SIH26157/
 │   │   ├── main.py              # FastAPI application entry point & CORS configuration
 │   │   ├── database.py          # SQLAlchemy SQLite connection & session management
 │   │   ├── models/
-│   │   │   └── domain.py        # SQLAlchemy database models (Entity, Alert, Finding, etc.)
+│   │   │   └── domain.py        # Database models (DatasetUpload, Entity, Alert, Finding, etc.)
 │   │   ├── schemas/
-│   │   │   └── api.py           # Pydantic request/response schemas
+│   │   │   └── api.py           # Pydantic request/response & quality report schemas
 │   │   ├── routers/
-│   │   │   └── api.py           # API endpoints (dashboard, findings, reviews, etc.)
-│   │   ├── analytics/           # Analytics & ML module directory
-│   │   ├── services/            # Business logic & services directory
+│   │   │   └── api.py           # API routes (/upload, /preview, /dashboard, /findings, etc.)
+│   │   ├── services/            # Core business logic services
+│   │   │   ├── ingestion.py     # Safe parsing, duplicate detection & DB persistence
+│   │   │   ├── validation.py    # Schema validation (Required vs Optional vs Unknown)
+│   │   │   ├── normalization.py # Normalizers (column names, severity, timestamps, booleans)
+│   │   │   └── adapters.py      # Canonical field mappings & dataset type detection
+│   │   ├── analytics/           # Analytics module directory (Module 4)
 │   │   └── utils/               # Backend utility helpers
+│   ├── tests/
+│   │   └── test_ingestion.py    # Unit & integration test suite for Ingestion & Normalization
 │   ├── data/                    # Local SQLite database storage (excluded from git)
 │   ├── seed.py                  # Database initialization and synthetic scenario seeding
 │   └── requirements.txt         # Python backend dependencies
@@ -98,6 +106,8 @@ SIH26157/
 │   │   │   └── Layout.jsx       # Global navigation bar, sidebar, and layout shell
 │   │   ├── pages/               # Application views
 │   │   │   ├── Dashboard.jsx
+│   │   │   ├── UploadData.jsx    # Real file upload with dynamic quality breakdown
+│   │   │   ├── DataPreview.jsx   # Real uploaded dataset preview table & search
 │   │   │   ├── AnalysisEngine.jsx
 │   │   │   ├── Findings.jsx
 │   │   │   ├── FindingDetail.jsx
@@ -105,8 +115,6 @@ SIH26157/
 │   │   │   ├── EntityDetail.jsx
 │   │   │   ├── EvidenceExplorer.jsx
 │   │   │   ├── Benchmarks.jsx
-│   │   │   ├── UploadData.jsx
-│   │   │   ├── DataPreview.jsx
 │   │   │   ├── ReportGeneration.jsx
 │   │   │   └── Login.jsx
 │   │   ├── services/
@@ -131,7 +139,184 @@ SIH26157/
 
 ---
 
-## 5. SOC Datasets & Public Benchmarks
+## 6. Assessment Assurance & Supervisory Core (Modules 3, 4 & 5)
+
+> [!IMPORTANT]
+> **Supervisory Assessment Assurance Methodology Disclaimer:**
+> Assessment assurance is a proposed analytical methodology and prototype implementation. Thresholds, weights, and decision rules defined herein require validation against expert supervisory review and do not constitute statutory NCIIPC / NTRO standards.
+
+### Core Conceptual Distinction: Finding Confidence vs. Assessment Validity
+- **Finding Confidence**: Answers *"How strongly does the available evidence support this specific finding within the submitted dataset?"* (e.g., 91% / HIGH).
+- **Assessment Validity**: Answers *"Is the available evidence sufficiently complete, representative, temporally covered, severity-covered, process-covered, internally consistent, and independent to support a broader supervisory conclusion?"* (Evaluated as `HIGH`, `CAUTION`, `LOW`, or `INDETERMINATE`).
+
+A finding may possess **HIGH confidence** based on observed evidence while exhibiting **CAUTION validity** if the submitted evidence covers only part of the declared operational population. SAT-SA explicitly rejects opaque single 0–100 validity scores, presenting instead a structured, explainable assurance profile.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        ASSESSMENT ASSURANCE PROFILE (MODULE 5)                         │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Population Exposure    ──► Observable records / Declared population (or UNKNOWN)    │
+│ 2. Multidimensional Cov   ──► Temporal span, Severity tiers, Assets & 4 Process stages │
+│ 3. Evidence Independence  ──► Evaluates shared source records across findings          │
+│ 4. Contradiction Engine   ──► Detects conflicting records vs missing records           │
+│ 5. Blind-Spot Detection   ──► Flags unmonitored assets & missing process stages        │
+│ 6. Source Hash Integrity  ──► Deterministic SHA-256 baseline verification               │
+│ 7. Supervisory Synthesis  ──► Human-in-the-loop explainable limitations & interpretation│
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Assessment Assurance Dimensions
+1. **Finding Confidence**: Deterministic heuristic calculation reflecting the volume, clarity, and consistency of observed records supporting a specific finding.
+2. **Assessment Validity**: Multi-dimensional evaluation across 5 operational dimensions classifying overall assurance as `HIGH`, `CAUTION`, `LOW`, or `INDETERMINATE`.
+3. **Population Exposure**: Compares observable population against declared submission population ($N_{\text{obs}} / N_{\text{claimed}}$). If no declared population is supplied, the system explicitly reports `UNKNOWN` without inventing a denominator.
+4. **Multidimensional Evidence Coverage**: Evaluates observable span across Temporal window, Severity representation (Critical, High, Medium, Low), Asset inventory telemetry, and Process stages (Detection $\rightarrow$ Investigation $\rightarrow$ Escalation $\rightarrow$ Closure).
+5. **Evidence Dependency & Independence**: Evaluates source record clustering to determine if multiple findings share identical underlying alert IDs (`HIGH_INDEPENDENCE`, `MODERATE_INDEPENDENCE`, `LOW_INDEPENDENCE`).
+6. **Contradiction Detection**: Explicitly differentiates between `MISSING` evidence (an unrecorded stage) and `CONTRADICTORY` evidence (e.g., alert marked escalated while case record states unescalated, or `created_at` > `closure_time`).
+7. **Evidence Blind Spots**: Identifies structural visibility gaps (e.g., zero critical alerts submitted, unmonitored critical assets, absent escalation telemetry) using neutral, non-accusatory supervisory language.
+8. **Data Integrity & SHA-256 Hashing**: Calculates deterministic SHA-256 cryptographic hashes at ingestion for data immutability tracking and baseline tamper detection.
+9. **Human Examiner Role**: Assures that automated heuristics advise and prioritize human examiners rather than making autonomous statutory judgments.
+
+---
+
+## 7. Local Agentic AI (Module 6)
+
+> [!IMPORTANT]
+> **Agentic AI Supervisory Safety Notice & Disclaimer:**
+> The agentic layer provides analytical recommendations and evidence-grounded reasoning support. It does **NOT** replace human supervisory judgment or autonomously finalize supervisory assessments. Local LLM outputs require human validation and must not be treated as authoritative or immutable evidence.
+
+SAT-SA incorporates an offline, evidence-grounded agentic reasoning layer designed to assist an NCIIPC human examiner in interrogating findings, performing adversarial critique, and formulating next-best evidence requests.
+
+```
+                  Evidence Graph + Analytics Findings + Assessment Assurance
+                                             │
+                                             ▼
+                                  ┌─────────────────────┐
+                                  │   ASSESSMENT AGENT  │
+                                  └──────────┬──────────┘
+                                             │
+                                   Assessment Hypothesis
+                                             │
+                                             ▼
+                                  ┌─────────────────────┐
+                                  │   CHALLENGE AGENT   │
+                                  └──────────┬──────────┘
+                                             │
+                                    Counter-evidence,
+                                 Contradictions & Blind Spots
+                                             │
+                                             ▼
+                                ┌──────────────────────────┐
+                                │  INVESTIGATION PLANNER   │
+                                └────────────┬─────────────┘
+                                             │
+                                 Next-Best Evidence Requests
+                                             │
+                                             ▼
+                                 ┌────────────────────────┐
+                                 │ HUMAN EXAMINER WORKSPACE│
+                                 └────────────────────────┘
+```
+
+### 1. The Three Primary Agents
+- **Assessment Agent**: Converts deterministic analytics and evidence traces into a structured, evidence-cited supervisory hypothesis.
+- **Challenge Agent**: Performs adversarial critique to probe whether missing logs, submission truncation, or alternative operational explanations (e.g., external ticketing systems, SOAR automation) explain the observation.
+- **Investigation Planner**: Recommends the next-best supervisory evidence request to reduce analytical uncertainty using a transparent prioritization heuristic:
+  $$\text{Investigation Priority} = \frac{\text{Evidence Relevance} \times \text{Uncertainty Reduction} \times \text{Finding Importance}}{\text{Review Effort}}$$
+
+### 2. Conceptual Separation of Confidences
+$$\text{Finding Confidence} \neq \text{Assessment Validity} \neq \text{Agent Confidence}$$
+- **Finding Confidence**: Strength of observed telemetry supporting a specific finding.
+- **Assessment Validity**: Completeness and representativeness of evidence across the operational population.
+- **Agent Confidence**: Model uncertainty in formulated hypotheses (not used as a substitute for evidence).
+
+### 3. Agent Permissions & Guardrails
+- **Strictly Prohibited Actions**: Agents cannot modify source evidence, delete records, alter findings, change risk scores, or finalize supervisory decisions.
+- **Evidence ID Validation**: Every cited evidence ID is strictly verified against the bounded context; hallucinated identifiers are rejected or repaired.
+- **Bounded Execution**: Maximum 3 agent steps (`MAX_AGENT_STEPS = 3`) to prevent unbounded loops.
+- **Human-in-the-Loop**: Workflow strictly terminates at `HUMAN_REVIEW_REQUIRED`. Only a human examiner can record a final decision (`CONFIRMED`, `REQUEST_EVIDENCE`, `MODIFY`, `REJECTED`).
+
+### 4. Local Model Architecture & Deterministic Fallback
+- **Local Ollama Integration**: Interacts with local open-weight models (e.g., Llama-3, Mistral, Qwen 2.5) over `http://127.0.0.1:11434` with zero external network access.
+- **Deterministic Fallback (`AGENT_MODE=DETERMINISTIC_FALLBACK`)**: If Ollama is offline or unavailable, SAT-SA automatically switches to deterministic template-based reasoning, ensuring that all supervisory functions remain operational without failure.
+
+### 5. Machine-Readable Audit Trail
+Every agent execution step records:
+`run_id`, `agent_id`, `finding_id`, `timestamp`, `input_context_hash`, `model_provider`, `model_name`, `prompt_version`, `output_hash`, `referenced_evidence_ids`, `action`, `status`, `validation_result`.
+These immutable audit records support post-assessment supervisory review and replay in Module 9.
+
+---
+
+## 8. Module 7: Human Examiner Workspace
+
+Module 7 implements the dedicated supervisory workstation empowering human examiners as the sole final decision-makers:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              HUMAN EXAMINER WORKFLOW                                   │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ REVIEW QUEUE ──► FINDING OVERVIEW ──► EVIDENCE TRACE ──► ASSESSMENT ASSURANCE          │
+│                                                                  │                     │
+│                                                                  ▼                     │
+│ FINAL ASSESSMENT ◄── DECISION HISTORY ◄── HUMAN DECISION ◄── AGENTIC REVIEW           │
+│                                            (Confirm/Request/                           │
+│                                             Modify/Reject/Defer)                       │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Workspace Features
+1. **Interactive Review Queue**:
+   - Multi-parameter filtering by Entity, Severity, Category, Assessment Validity, Decision Status, and Agent Status.
+   - Dynamic sorting by Priority Score, Severity, Finding Confidence, Assessment Validity, and Created Timestamp.
+   - Supervisory context callout (*"Why should the examiner look at this?"*).
+2. **Unified Finding Workspace (`FindingDetail.jsx`)**:
+   - **Section A: Finding Header**: Prominent presentation of Severity, Priority, Confidence, Assessment Validity (`HIGH`, `CAUTION`, `LOW`, `INDETERMINATE`), and Decision Status with advisory disclaimer.
+   - **Section B: Observed Facts**: Ground-truth deterministic metrics, rule IDs, affected record counts, source hashes, and evidence IDs.
+   - **Section C: Supervisory Rationale**: Triggering conditions and evidence-grounded interpretation.
+   - **Section D: Interactive Evidence Explorer**: Full Entity → Asset → Alert → Case → Investigation → Escalation chain with missing link indicators.
+   - **Section E: Assessment Assurance Matrix**: Structured breakdown across 8 dimensions (Population Exposure, Temporal Coverage, Severity Coverage, Asset Coverage, Process Coverage, Dependency, Contradictions, Source Integrity).
+   - **Section F: Evidence Limitations**: Explicit segregation of Missing, Contradictory, Unknown, and Partial evidence.
+   - **Section G: Agentic Supervisory Review**: Tri-panel advisory review presenting Assessment Agent hypotheses, Challenge Agent counter-evidence, and Investigation Planner recommendations.
+   - **Section H: Human Examiner Decision**: Interactive action forms for `[ CONFIRM ]`, `[ REQUEST EVIDENCE ]`, `[ MODIFY ]`, `[ REJECT ]`, and `[ DEFER ]` with mandatory notes/rationale enforcement.
+   - **Section I: Chronological Decision History & Audit Timeline**: Immutable append-only audit trail showing all analytical stages, agent evaluations, evidence requests, and examiner adjudications.
+
+---
+
+## 9. Module 8: Reporting & Supervisory Dashboard
+
+Module 8 transforms underlying evidence, analytics, assessment assurance, and human adjudication into a complete, evidence-grounded supervisory evaluation:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              MODULE 8 REPORTING PIPELINE                               │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ CSE DATA ──► ANALYTICS ──► ASSURANCE ──► AGENT REVIEW ──► HUMAN ADJUDICATION           │
+│                                                                  │                     │
+│                                                                  ▼                     │
+│ TRACEABLE EVIDENCE ◄── EXPORT (PDF/JSON) ◄── FINAL REPORT ◄── SUPERVISORY DASHBOARD    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Capabilities
+1. **Supervisory Assessment Dashboard (`Dashboard.jsx`)**:
+   - Live entity overview cards (record counts, finding counts, validity profile).
+   - Prioritized Supervisory Attention Feed with direct link to examiner workspace.
+   - 8 Operational Capabilities Overview with evidence-backed status chips (`OBSERVED CONCERN`, `NO OBSERVED CONCERN`, `INSUFFICIENT EVIDENCE`, `NOT ASSESSED`).
+   - Categorized findings distribution & human examiner adjudication summary.
+2. **Entity-Level Assessment View (`EntityDetail.jsx`)**:
+   - Dedicated CSE evaluation view covering all 8 operational capabilities, assurance dimensions, evidence limitations, and active evidence requests.
+   - One-click JSON export and printable PDF download.
+3. **8 Operational Capability Evaluation**:
+   - Evidence-grounded mapping across the 8 NCIIPC dimensions: *Threat Detection, Investigation, Escalation, Incident Response, Security Operations, Governance & Oversight, Operational Discipline, Cyber Resilience*.
+   - Strictly enforces: *"Absence of a finding is not equivalent to proof of adequate performance."*
+4. **Deterministic Report Compilation (`backend/app/services/reporting.py`)**:
+   - Machine-readable structured JSON report objects.
+   - Cryptographic traceability registry mapping every finding: $\text{Finding ID} \rightarrow \text{Analysis ID} \rightarrow \text{Evidence IDs} \rightarrow \text{Assurance} \rightarrow \text{Agent Run} \rightarrow \text{Human Decision}$.
+5. **Printable Supervisory PDF Generator (ReportLab)**:
+   - Self-contained, offline PDF compilation producing official NTRO/NCIIPC supervisory assessment documents with dynamic multi-page numbering, metadata tables, assurance matrices, and evidence limitation summaries.
+
+---
+
+## 10. SOC Datasets & Public Benchmarks
 
 SAT-SA is designed to work with periodic exports from Security Operations Centers. For evaluation, benchmarking, and development, the project references two public SOC research datasets:
 
@@ -147,20 +332,15 @@ SAT-SA is designed to work with periodic exports from Security Operations Center
 - **Local Placement**: Place CSV files (`soc_alerts.csv`, `assets.csv`, `cti_indicators.csv`, `analyst_feedback.csv`) into `data/public/ai_soc/`.
 - **Note**: Excluded from Git tracking.
 
-### Inspecting Datasets
-To inspect column schemas, data types, and sample records of local datasets:
-```bash
-python inspect_datasets.py
-```
-
 ---
 
-## 6. Getting Started & Local Setup
+## 11. Getting Started & Local Setup
 
 ### Prerequisites
 - **Python**: 3.9 or higher
 - **Node.js**: 18 or higher (tested with Node 20 / 24)
 - **npm**: 9 or higher
+- **Ollama** *(Optional for local LLM mode)*: `http://localhost:11434`
 
 ---
 
@@ -191,9 +371,13 @@ python inspect_datasets.py
    ```bash
    python seed.py
    ```
-   *This initializes the database schema in `backend/data/satsa.db` and populates 10 Critical Sector Entities (CSE-001 to CSE-010) with realistic baseline alerts, injected execution gaps (CSE-003), and missing telemetry scenarios (CSE-005).*
 
-5. Start the FastAPI backend server:
+5. Run the automated test suite:
+   ```bash
+   PYTHONPATH=. pytest tests -v
+   ```
+
+6. Start the FastAPI backend server:
    ```bash
    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
@@ -226,7 +410,7 @@ python inspect_datasets.py
 
 ---
 
-## 7. Demo Credentials & Test Scenarios
+## 12. Demo Credentials & Test Scenarios
 
 ### Login Credentials
 - **Username**: `demo_supervisor`
@@ -239,24 +423,26 @@ python inspect_datasets.py
 
 ---
 
-## 8. Offline & Air-Gapped Operation
+## 13. Offline & Air-Gapped Operation
 
 SAT-SA is architected with strict air-gapped constraints:
 - **Zero External API Dependencies**: No runtime calls to external third-party cloud services or telemetry collectors.
 - **Embedded Database Engine**: Uses self-contained local SQLite storage requiring no external database servers.
 - **Local Asset Bundling**: All JavaScript, CSS, and icon assets (Lucide) are bundled locally through Vite.
+- **Local Model Runner**: Uses local Ollama instance on localhost or deterministic fallback.
 - **No Secret Leakage**: Fully configurable via local `.env` variables with safe `.env.example` templates.
 
 ---
 
-## 9. Limitations & Planned Roadmap
+## 14. Limitations & Planned Roadmap
 
-- **Batch Analytics Execution**: In the current version, `POST /api/analysis/run` simulates the multi-stage background execution pipeline; custom batch analytics scripts can be plugged into `backend/app/analytics/`.
-- **ML Anomaly Detectors**: Isolation Forest, One-Class SVM, and clustering models for unsupervised SOC anomaly detection can be mounted into the analytics pipeline.
-- **Custom Exporters**: Direct integration for STIX/TAXII and PDF export formats for supervisory compliance reports.
+- **Audit & Replay Engine (Module 9)**: Step-by-step analytical replay of agent and supervisory decisions.
 
 ---
 
-## 10. License & Attribution
+## 15. License & Attribution
 
 Developed for **Smart India Hackathon (SIH) — Problem Statement SIH26157**.
+
+
+

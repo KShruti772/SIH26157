@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database import engine, Base
+from app.database import engine, Base, init_db
 from app.routers import api
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# Create and migrate tables
+init_db()
 
 app = FastAPI(title="SAT-SA", description="Supervisory Analytics Tool for SOC Assessment")
 

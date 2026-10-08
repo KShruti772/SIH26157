@@ -145,6 +145,8 @@ data/public/*.tar.gz
 reports/generated/
 outputs/
 artifacts/
+scratch/
+
 
 # OS / archives
 *.zip
