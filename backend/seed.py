@@ -157,6 +157,27 @@ def seed():
         ))
         db.add(domain.ReviewItem(finding_id="NS-0015", priority_score=88.0, status="Pending", notes="Demo baseline review item"))
 
+    # Seed Default Supervisor & Reviewer Users
+    from app.services.auth import hash_password
+    db.add(domain.User(
+        id="USR-DEFAULT-SUP",
+        full_name="Lead Supervisory Examiner",
+        email="supervisor@ntro.gov",
+        password_hash=hash_password("SupervisoryPass2026!"),
+        organization="NTRO / NCIIPC Supervisory Division",
+        role="SUPERVISOR",
+        is_active=True,
+    ))
+    db.add(domain.User(
+        id="USR-DEFAULT-REV",
+        full_name="SOC Assessment Reviewer",
+        email="reviewer@ntro.gov",
+        password_hash=hash_password("ReviewerPass2026!"),
+        organization="National Cyber Coordination Centre",
+        role="REVIEWER",
+        is_active=True,
+    ))
+
     db.commit()
     db.close()
     print("Database seeding and analytical discovery completed.")

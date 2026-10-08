@@ -166,4 +166,4 @@ docker-volumes/
 !docs/.gitkeep
 !sample_data/.gitkeep
 !notebooks/.gitkeep
-!reports/.gitkeep
+!reports/.gitkeep.venv/

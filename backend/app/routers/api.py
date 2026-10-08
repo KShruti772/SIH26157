@@ -25,24 +25,207 @@ from app.agents.schemas import (
     AgentAuditLogResponse,
 )
 
+import re
+from app.services import auth as auth_service
+from app.services.auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+    require_role,
+    UserRole,
+    ALLOWED_SELF_REGISTER_ROLES,
+)
+
 router = APIRouter()
 
-
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 # 100 MB max for prototype upload
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
 
 @router.get("/health")
 def health_check():
     return {"status": "ok"}
 
-@router.post("/auth/login")
-def login(req: LoginRequest):
-    if req.username and req.password:
-        return {"token": "demo-token", "role": "Supervisor", "name": "Admin User"}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+@router.post("/auth/register", response_model=schemas.AuthTokenResponse, status_code=status.HTTP_201_CREATED)
+def register_user(req: schemas.UserRegisterRequest, db: Session = Depends(get_db)):
+    """
+    Registers a new user account (SUPERVISOR or REVIEWER).
+    ADMINISTRATOR self-registration is strictly disallowed.
+    """
+    email_clean = (req.email or "").strip().lower()
+    full_name_clean = (req.full_name or "").strip()
+    org_clean = (req.organization or "").strip()
+    role_clean = (req.role or "").strip().upper()
+
+    if not full_name_clean:
+        raise HTTPException(status_code=400, detail="Full name is required.")
+
+    if not org_clean:
+        raise HTTPException(status_code=400, detail="Organization is required.")
+
+    if not email_clean or not EMAIL_REGEX.match(email_clean):
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
+
+    if role_clean == UserRole.ADMINISTRATOR:
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator accounts cannot be self-registered. Contact system administration.",
+        )
+
+    if role_clean not in ALLOWED_SELF_REGISTER_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid role '{req.role}'. Allowed self-registration roles: {', '.join(ALLOWED_SELF_REGISTER_ROLES)}",
+        )
+
+    if req.password != req.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+
+    if len(req.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long.")
+
+    # Check for existing email
+    existing = db.query(domain.User).filter(domain.User.email == email_clean).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this email address already exists.")
+
+    user_id = f"USR-{uuid.uuid4().hex[:10].upper()}"
+    pwd_hash = hash_password(req.password)
+
+    new_user = domain.User(
+        id=user_id,
+        full_name=full_name_clean,
+        email=email_clean,
+        password_hash=pwd_hash,
+        organization=org_clean,
+        role=role_clean,
+        is_active=True,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Record USER_REGISTERED audit event
+    try:
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.USER_REGISTERED,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=user_id,
+            payload={
+                "user_id": user_id,
+                "email": email_clean,
+                "full_name": full_name_clean,
+                "organization": org_clean,
+                "role": role_clean,
+            },
+        )
+    except Exception:
+        pass
+
+    token = create_access_token(new_user)
+    return schemas.AuthTokenResponse(
+        token=token,
+        token_type="bearer",
+        user=schemas.UserResponse.model_validate(new_user),
+        role=new_user.role,
+        name=new_user.full_name,
+    )
+
+
+@router.post("/auth/login", response_model=schemas.AuthTokenResponse)
+def login_user(req: schemas.UserLoginRequest, db: Session = Depends(get_db)):
+    """
+    Authenticates a user via email and password, issuing a signed JWT token.
+    Returns generic authentication error for any invalid credential.
+    """
+    email_clean = (req.email or "").strip().lower()
+    user = db.query(domain.User).filter(domain.User.email == email_clean).first()
+
+    audit_svc = AuditService()
+
+    if not user or not verify_password(req.password, user.password_hash):
+        try:
+            audit_svc.record_event(
+                db=db,
+                event_type=EventType.USER_LOGIN_FAILED,
+                actor_type=ActorType.SYSTEM,
+                actor_id="AuthService",
+                payload={"attempted_email": email_clean, "reason": "INVALID_CREDENTIALS"},
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated. Contact system administrator.",
+        )
+
+    try:
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.USER_LOGIN,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=user.id,
+            payload={
+                "user_id": user.id,
+                "email": user.email,
+                "role": user.role,
+                "organization": user.organization,
+            },
+        )
+    except Exception:
+        pass
+
+    token = create_access_token(user)
+    return schemas.AuthTokenResponse(
+        token=token,
+        token_type="bearer",
+        user=schemas.UserResponse.model_validate(user),
+        role=user.role,
+        name=user.full_name,
+    )
+
+
+@router.get("/auth/me", response_model=schemas.UserResponse)
+def get_current_user_profile(
+    current_user: domain.User = Depends(get_current_user),
+):
+    """
+    Retrieves the currently authenticated user profile from validated JWT session.
+    """
+    return schemas.UserResponse.model_validate(current_user)
+
+
+@router.post("/auth/logout")
+def logout_user(
+    current_user: domain.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Logs out the authenticated user and records USER_LOGOUT audit event.
+    """
+    try:
+        audit_svc = AuditService()
+        audit_svc.record_event(
+            db=db,
+            event_type=EventType.USER_LOGOUT,
+            actor_type=ActorType.HUMAN_EXAMINER,
+            actor_id=current_user.id,
+            payload={"user_id": current_user.id, "email": current_user.email},
+        )
+    except Exception:
+        pass
+    return {"status": "ok", "message": "Successfully logged out."}
 
 # In-memory storage for active analysis tracking
 analysis_store = {}

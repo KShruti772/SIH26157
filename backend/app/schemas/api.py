@@ -448,4 +448,43 @@ class AssessmentSnapshotResponse(BaseModel):
         from_attributes = True
 
 
+# =========================================================================
+# AUTHENTICATION & USER SCHEMAS
+# =========================================================================
+
+class UserRegisterRequest(BaseModel):
+    full_name: str
+    email: str
+    password: str
+    confirm_password: str
+    organization: str
+    role: str = "SUPERVISOR" # Allowed self-registration: SUPERVISOR, REVIEWER
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    organization: str
+    role: str
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AuthTokenResponse(BaseModel):
+    token: str
+    token_type: str = "bearer"
+    user: UserResponse
+    role: str
+    name: str
+
+
 

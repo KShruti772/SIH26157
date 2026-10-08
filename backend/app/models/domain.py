@@ -3,6 +3,18 @@ from sqlalchemy.orm import relationship
 from app.database import Base
 import datetime
 
+class User(Base):
+    __tablename__ = "users"
+    id = Column(String, primary_key=True, index=True) # UUID
+    full_name = Column(String, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    organization = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="REVIEWER") # SUPERVISOR, REVIEWER, ADMINISTRATOR
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
 class Entity(Base):
     __tablename__ = "entities"
     id = Column(String, primary_key=True, index=True)

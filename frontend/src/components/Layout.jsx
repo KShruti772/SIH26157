@@ -1,9 +1,11 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { 
   LayoutDashboard, Upload, Search, Activity, FileText, 
-  AlertTriangle, Eye, Users, FileBarChart, LogOut, History 
+  AlertTriangle, Eye, Users, FileBarChart, LogOut, History,
+  ShieldCheck, ShieldAlert
 } from 'lucide-react';
+import api from '../services/api';
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -18,11 +20,56 @@ const navItems = [
 const Layout = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const cached = localStorage.getItem('user');
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    navigate('/login');
+  useEffect(() => {
+    let isMounted = true;
+    const fetchUser = async () => {
+      try {
+        const res = await api.get('/auth/me');
+        if (isMounted && res.data) {
+          setCurrentUser(res.data);
+          localStorage.setItem('user', JSON.stringify(res.data));
+        }
+      } catch (err) {
+        // Interceptor handles 401 redirect
+      }
+    };
+    fetchUser();
+    return () => { isMounted = false; };
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await api.post('/auth/logout');
+    } catch {
+      // Ignore network errors during logout
+    } finally {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      navigate('/login');
+    }
   };
+
+  const displayName = currentUser?.full_name || currentUser?.name || 'Examiner';
+  const displayEmail = currentUser?.email || 'authenticated@sat-sa.local';
+  const displayRole = (currentUser?.role || 'SUPERVISOR').toUpperCase();
+  const initials = displayName
+    .split(' ')
+    .filter(Boolean)
+    .map((n) => n[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase() || 'EX';
+
+  const isSupervisor = displayRole === 'SUPERVISOR';
 
   return (
     <div className="flex h-screen bg-slate-900 text-slate-100 overflow-hidden">
@@ -58,21 +105,32 @@ const Layout = ({ children }) => {
           </ul>
         </nav>
         
-        <div className="p-4 border-t border-slate-700">
-          <div className="flex items-center mb-4">
-            <div className="w-8 h-8 rounded-full bg-slate-600 flex items-center justify-center mr-3">
-              <span className="text-sm font-medium">SU</span>
+        <div className="p-4 border-t border-slate-700 bg-slate-800/80">
+          <div className="flex items-center mb-3">
+            <div className={`w-9 h-9 rounded-lg flex items-center justify-center mr-3 font-semibold text-xs text-white shadow-sm ${
+              isSupervisor ? 'bg-blue-600' : 'bg-emerald-600'
+            }`}>
+              <span>{initials}</span>
             </div>
-            <div>
-              <p className="text-sm font-medium">Supervisor</p>
-              <p className="text-xs text-slate-400">admin@ntro.gov</p>
+            <div className="overflow-hidden min-w-0 flex-1">
+              <p className="text-xs font-semibold text-slate-200 truncate">{displayName}</p>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-medium tracking-wide uppercase ${
+                  isSupervisor
+                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                }`}>
+                  {displayRole}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 truncate mt-0.5">{displayEmail}</p>
             </div>
           </div>
           <button 
             onClick={handleLogout}
-            className="flex items-center text-sm text-slate-400 hover:text-white transition-colors w-full"
+            className="flex items-center text-xs font-medium text-slate-400 hover:text-red-300 transition-colors w-full pt-2 border-t border-slate-700/60 cursor-pointer"
           >
-            <LogOut className="w-4 h-4 mr-2" />
+            <LogOut className="w-3.5 h-3.5 mr-2" />
             Sign Out
           </button>
         </div>
