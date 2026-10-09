@@ -395,6 +395,19 @@ SAT-SA is designed to work with periodic exports from Security Operations Center
 
 ---
 
+### Environment Configuration
+
+SAT-SA enforces secure offline configuration via environment variables:
+
+| Variable | Required | Description | Example / Default |
+| :--- | :--- | :--- | :--- |
+| `SAT_SA_SECRET_KEY` | **Yes** | Cryptographic secret for signing and validating JWT access tokens. Fails closed if missing. | `export SAT_SA_SECRET_KEY="generate-strong-key-here"` |
+| `SAT_SA_CORS_ORIGINS` | No | Comma-delimited list of permitted CORS origins. Defaults to local frontend URLs. | `http://localhost:5173,http://localhost:3000` |
+| `SAT_SA_ENV` | No | Runtime environment (`development`, `production`). | `development` |
+| `DATABASE_URL` | No | SQLAlchemy database URL. Defaults to local SQLite. | `sqlite:///./data/sat_sa.db` |
+
+---
+
 ### Backend Installation & Database Setup
 
 1. Navigate to the `backend/` directory:
@@ -418,17 +431,35 @@ SAT-SA is designed to work with periodic exports from Security Operations Center
    pip install -r requirements.txt
    ```
 
-4. Initialize and seed the SQLite database with test scenarios:
+4. Set your mandatory JWT secret key:
+   ```bash
+   # macOS / Linux
+   export SAT_SA_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+
+   # Windows PowerShell
+   $env:SAT_SA_SECRET_KEY = [System.Guid]::NewGuid().ToString("N")
+   ```
+
+5. Initialize and seed the SQLite database with test scenarios:
    ```bash
    python seed.py
    ```
 
-5. Run the automated test suite:
+6. Bootstrap an Administrator or Supervisor account via CLI:
+   ```bash
+   # Create or promote an Administrator:
+   python bootstrap_admin.py --email admin@ntro.gov --name "System Administrator" --role ADMINISTRATOR
+
+   # Create or promote a Supervisor:
+   python bootstrap_admin.py --email supervisor.smith@ntro.gov --name "Lead Supervisor" --role SUPERVISOR
+   ```
+
+7. Run the automated test suite (all tests execute against isolated SQLite in-memory databases with dedicated test secrets):
    ```bash
    PYTHONPATH=. pytest tests -v
    ```
 
-6. Start the FastAPI backend server:
+8. Start the FastAPI backend server:
    ```bash
    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
@@ -461,16 +492,35 @@ SAT-SA is designed to work with periodic exports from Security Operations Center
 
 ---
 
-## 12. Demo Credentials & Test Scenarios
+## 12. Security Architecture & RBAC Permission Matrix
 
-### Login Credentials
-- **Username**: `demo_supervisor`
-- **Password**: `demo_password`
+SAT-SA implements defense-in-depth offline authentication and role-based access control (RBAC):
 
-### Injected Diagnostic Scenarios (Seeded Data)
-- **Scenario 1 (CSE-003 — Execution Gap)**: Critical-severity exfiltration alerts were acknowledged and closed within 5–6 minutes without required tier escalation, triggering finding `EG-0042` with high priority in the review queue.
-- **Scenario 2 (CSE-005 — Negative Space)**: Critical infrastructure assets identified with zero incoming log telemetry over the assessment window, triggering finding `NS-0015`.
-- **Scenario 3 (Peer Deviations)**: Investigation duration distributions and closure rates benchmarked against peer median/average percentiles across CSE cohorts.
+### Core Security Controls
+- **Central API Gateway Protection**: All `/api` data, assessment, finding, reporting, agentic, and audit routes require `Depends(get_current_user)` authentication. Only `/api/health`, `/api/auth/register`, and `/api/auth/login` remain public.
+- **Fail-Closed Secret Key**: The application refuses to start or issue/validate tokens if `SAT_SA_SECRET_KEY` is not explicitly configured.
+- **Persistent Token Revocation**: Each JWT token includes a unique `jti` claim. Upon logout, the token is recorded in the persistent `revoked_tokens` database table; revoked tokens immediately yield `401 Unauthorized` across all endpoints.
+- **Strict Self-Registration Policy**: Public self-registration (`POST /api/auth/register`) strictly defaults to the `REVIEWER` role. Attempting to self-register as `SUPERVISOR` or `ADMINISTRATOR` is rejected with `403 Forbidden`. Elevated roles must be provisioned via the secure offline CLI tool (`bootstrap_admin.py`) or assigned by an existing `ADMINISTRATOR`.
+- **Zero Credential Leaking in Audit Logs**: Passwords, hashes, JWTs, and secret keys are stripped prior to audit event recording and never exposed in error responses or logs.
+
+### Role Permission Matrix
+
+| Resource / Action | Endpoint | REVIEWER | SUPERVISOR | ADMINISTRATOR |
+| :--- | :--- | :---: | :---: | :---: |
+| Health Check | `GET /api/health` | **Public** | **Public** | **Public** |
+| Register / Login | `POST /api/auth/register`, `login` | **Public** | **Public** | **Public** |
+| Current User Profile / Logout | `GET /api/auth/me`, `POST /api/auth/logout` | Allowed | Allowed | Allowed |
+| Read Findings, Datasets, Evidence | `GET /api/findings`, `GET /api/datasets`, etc. | Allowed | Allowed | Allowed |
+| View Dashboard & Assessment Profiles | `GET /api/dashboard/*`, `GET /api/entities/*` | Allowed | Allowed | Allowed |
+| Adjudicate Findings (Confirm/Reject/Modify) | `POST /api/findings/{id}/decision` | Forbidden (403) | Allowed | Allowed |
+| Resolve Evidence Requests | `POST /api/evidence-requests/{id}/status` | Forbidden (403) | Allowed | Allowed |
+| Upload SOC Datasets | `POST /api/upload` | Forbidden (403) | Allowed | Allowed |
+| Execute Analytics & Risk Scoring | `POST /api/analytics/*` | Forbidden (403) | Allowed | Allowed |
+| Trigger / Override Agent Runs | `POST /api/agents/*` | Forbidden (403) | Allowed | Allowed |
+| Generate Supervisory PDF & Reports | `POST /api/reports/generate`, `GET .../pdf` | Forbidden (403) | Allowed | Allowed |
+| Trigger Cryptographic Audit Replay | `POST /api/audit/replay` | Forbidden (403) | Allowed | Allowed |
+| Create Assessment Snapshots | `POST /api/audit/snapshots` | Forbidden (403) | Allowed | Allowed |
+| User Management & Role Promotion | `GET/POST /api/admin/users/*` | Forbidden (403) | Forbidden (403) | Allowed |
 
 ---
 
@@ -496,6 +546,7 @@ SAT-SA is architected with strict air-gapped constraints:
 - **Module 7 — Human Examiner Workspace**: Complete (100%)
 - **Module 8 — Reporting & Supervisory Dashboard**: Complete (100%)
 - **Module 9 — Audit & Replay Engine**: Complete (100%)
+- **Hardened Authentication & Authorization**: Complete (100%)
 
 ---
 

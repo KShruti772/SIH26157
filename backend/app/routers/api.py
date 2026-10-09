@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, status
 from fastapi.responses import Response, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
@@ -7,6 +8,9 @@ import time
 import json
 import uuid
 import asyncio
+import re
+import logging
+import datetime
 
 from app.database import get_db, SessionLocal
 from app.models import domain
@@ -25,7 +29,6 @@ from app.agents.schemas import (
     AgentAuditLogResponse,
 )
 
-import re
 from app.services import auth as auth_service
 from app.services.auth import (
     hash_password,
@@ -33,63 +36,80 @@ from app.services.auth import (
     create_access_token,
     get_current_user,
     require_role,
+    revoke_token,
+    security_scheme,
     UserRole,
     ALLOWED_SELF_REGISTER_ROLES,
 )
 
+logger = logging.getLogger("satsa.api")
+
+# Central Public and Protected Router definitions
+public_router = APIRouter()
+protected_router = APIRouter(dependencies=[Depends(get_current_user)])
+
+# Unified router for backward-compatibility
 router = APIRouter()
+router.include_router(public_router)
+router.include_router(protected_router)
 
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024 # 100 MB max for prototype upload
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 
-@router.get("/health")
+# =========================================================================
+# PUBLIC ENDPOINTS (No Authentication Required)
+# =========================================================================
+
+@public_router.get("/health")
 def health_check():
+    """System liveness/health probe."""
     return {"status": "ok"}
 
 
-@router.post("/auth/register", response_model=schemas.AuthTokenResponse, status_code=status.HTTP_201_CREATED)
+@public_router.post("/auth/register", response_model=schemas.AuthTokenResponse, status_code=status.HTTP_201_CREATED)
 def register_user(req: schemas.UserRegisterRequest, db: Session = Depends(get_db)):
     """
-    Registers a new user account (SUPERVISOR or REVIEWER).
-    ADMINISTRATOR self-registration is strictly disallowed.
+    Registers a new standard user account.
+    Public self-registration is strictly restricted to REVIEWER role.
+    SUPERVISOR and ADMINISTRATOR roles must be provisioned through administrative controls.
     """
     email_clean = (req.email or "").strip().lower()
     full_name_clean = (req.full_name or "").strip()
     org_clean = (req.organization or "").strip()
-    role_clean = (req.role or "").strip().upper()
+    requested_role = (req.role or UserRole.REVIEWER).strip().upper()
 
     if not full_name_clean:
-        raise HTTPException(status_code=400, detail="Full name is required.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Full name is required.")
 
     if not org_clean:
-        raise HTTPException(status_code=400, detail="Organization is required.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Organization is required.")
 
     if not email_clean or not EMAIL_REGEX.match(email_clean):
-        raise HTTPException(status_code=400, detail="A valid email address is required.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A valid email address is required.")
 
-    if role_clean == UserRole.ADMINISTRATOR:
+    if requested_role in [UserRole.SUPERVISOR, UserRole.ADMINISTRATOR]:
         raise HTTPException(
-            status_code=403,
-            detail="Administrator accounts cannot be self-registered. Contact system administration.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Self-registration as '{requested_role}' is not permitted. Only REVIEWER accounts may self-register. Contact an administrator for elevated privileges.",
         )
 
-    if role_clean not in ALLOWED_SELF_REGISTER_ROLES:
+    if requested_role not in ALLOWED_SELF_REGISTER_ROLES:
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid role '{req.role}'. Allowed self-registration roles: {', '.join(ALLOWED_SELF_REGISTER_ROLES)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{req.role}'. Allowed self-registration role: REVIEWER.",
         )
 
     if req.password != req.confirm_password:
-        raise HTTPException(status_code=400, detail="Passwords do not match.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Passwords do not match.")
 
     if len(req.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters long.")
 
     # Check for existing email
     existing = db.query(domain.User).filter(domain.User.email == email_clean).first()
     if existing:
-        raise HTTPException(status_code=409, detail="An account with this email address already exists.")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email address already exists.")
 
     user_id = f"USR-{uuid.uuid4().hex[:10].upper()}"
     pwd_hash = hash_password(req.password)
@@ -100,7 +120,7 @@ def register_user(req: schemas.UserRegisterRequest, db: Session = Depends(get_db
         email=email_clean,
         password_hash=pwd_hash,
         organization=org_clean,
-        role=role_clean,
+        role=UserRole.REVIEWER,
         is_active=True,
     )
     db.add(new_user)
@@ -120,11 +140,11 @@ def register_user(req: schemas.UserRegisterRequest, db: Session = Depends(get_db
                 "email": email_clean,
                 "full_name": full_name_clean,
                 "organization": org_clean,
-                "role": role_clean,
+                "role": UserRole.REVIEWER,
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Audit log failed for user registration: {e}")
 
     token = create_access_token(new_user)
     return schemas.AuthTokenResponse(
@@ -136,10 +156,10 @@ def register_user(req: schemas.UserRegisterRequest, db: Session = Depends(get_db
     )
 
 
-@router.post("/auth/login", response_model=schemas.AuthTokenResponse)
+@public_router.post("/auth/login", response_model=schemas.AuthTokenResponse)
 def login_user(req: schemas.UserLoginRequest, db: Session = Depends(get_db)):
     """
-    Authenticates a user via email and password, issuing a signed JWT token.
+    Authenticates a user via email and password, issuing a signed JWT token with unique JTI.
     Returns generic authentication error for any invalid credential.
     """
     email_clean = (req.email or "").strip().lower()
@@ -156,8 +176,8 @@ def login_user(req: schemas.UserLoginRequest, db: Session = Depends(get_db)):
                 actor_id="AuthService",
                 payload={"attempted_email": email_clean, "reason": "INVALID_CREDENTIALS"},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Audit log failed for failed login: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
@@ -183,8 +203,8 @@ def login_user(req: schemas.UserLoginRequest, db: Session = Depends(get_db)):
                 "organization": user.organization,
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Audit log failed for user login: {e}")
 
     token = create_access_token(user)
     return schemas.AuthTokenResponse(
@@ -196,24 +216,51 @@ def login_user(req: schemas.UserLoginRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/auth/me", response_model=schemas.UserResponse)
+# =========================================================================
+# PROTECTED AUTHENTICATION & USER ENDPOINTS
+# =========================================================================
+
+@protected_router.get("/auth/me", response_model=schemas.UserResponse)
 def get_current_user_profile(
     current_user: domain.User = Depends(get_current_user),
 ):
     """
-    Retrieves the currently authenticated user profile from validated JWT session.
+    Retrieves the currently authenticated user profile from validated, unrevoked JWT session.
     """
     return schemas.UserResponse.model_validate(current_user)
 
 
-@router.post("/auth/logout")
+@protected_router.post("/auth/logout")
 def logout_user(
+    auth: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     current_user: domain.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Logs out the authenticated user and records USER_LOGOUT audit event.
+    Logs out the authenticated user, persistently revokes the token JTI in the database,
+    and records a USER_LOGOUT audit event.
     """
+    if not auth or not auth.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No authorization token provided for logout.",
+        )
+
+    try:
+        revoke_token(db=db, token=auth.credentials, reason="USER_LOGOUT")
+    except ValueError as ve:
+        logger.warning(f"Invalid token supplied during logout for user {current_user.id}: {type(ve).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token provided for logout.",
+        )
+    except Exception as e:
+        logger.error(f"Token revocation failed during logout for user {current_user.id}: {type(e).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revoke session token. Logout not completed.",
+        )
+
     try:
         audit_svc = AuditService()
         audit_svc.record_event(
@@ -223,307 +270,449 @@ def logout_user(
             actor_id=current_user.id,
             payload={"user_id": current_user.id, "email": current_user.email},
         )
-    except Exception:
-        pass
-    return {"status": "ok", "message": "Successfully logged out."}
+    except Exception as e:
+        logger.error(f"Audit log failed for user logout: {type(e).__name__}")
+    return {"status": "ok", "message": "Successfully logged out and revoked token."}
+
+
+# =========================================================================
+# USER ADMINISTRATION (ADMINISTRATOR ONLY)
+# =========================================================================
+
+class RoleUpdateRequest(BaseModel):
+    role: str
+
+class UserStatusUpdateRequest(BaseModel):
+    is_active: bool
+
+@protected_router.get("/admin/users", response_model=List[schemas.UserResponse])
+def list_users(
+    admin: domain.User = Depends(require_role([UserRole.ADMINISTRATOR])),
+    db: Session = Depends(get_db),
+):
+    """Administrator-only: list all registered users."""
+    users = db.query(domain.User).order_by(domain.User.created_at.asc()).all()
+    return [schemas.UserResponse.model_validate(u) for u in users]
+
+
+@protected_router.patch("/admin/users/{user_id}/role", response_model=schemas.UserResponse)
+def update_user_role(
+    user_id: str,
+    req: RoleUpdateRequest,
+    admin: domain.User = Depends(require_role([UserRole.ADMINISTRATOR])),
+    db: Session = Depends(get_db),
+):
+    """Administrator-only: update user role (REVIEWER, SUPERVISOR, ADMINISTRATOR)."""
+    target_role = (req.role or "").strip().upper()
+    if target_role not in [UserRole.REVIEWER, UserRole.SUPERVISOR, UserRole.ADMINISTRATOR]:
+        raise HTTPException(status_code=400, detail=f"Invalid role '{req.role}'.")
+
+    user = db.query(domain.User).filter(domain.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.role = target_role
+    db.commit()
+    db.refresh(user)
+    return schemas.UserResponse.model_validate(user)
+
+
+@protected_router.patch("/admin/users/{user_id}/status", response_model=schemas.UserResponse)
+def update_user_status(
+    user_id: str,
+    req: UserStatusUpdateRequest,
+    admin: domain.User = Depends(require_role([UserRole.ADMINISTRATOR])),
+    db: Session = Depends(get_db),
+):
+    """Administrator-only: activate or deactivate a user account."""
+    user = db.query(domain.User).filter(domain.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.is_active = req.is_active
+    db.commit()
+    db.refresh(user)
+    return schemas.UserResponse.model_validate(user)
+
+
+# =========================================================================
+# MODULE 1 & 2 — INGESTION & DATASET MANAGEMENT
+# =========================================================================
 
 # In-memory storage for active analysis tracking
 analysis_store = {}
 
-@router.post("/upload", response_model=schemas.UploadResponse)
-async def upload_data(file: UploadFile = File(...), db: Session = Depends(get_db)):
+@protected_router.post("/upload", response_model=schemas.UploadResponse)
+async def upload_data(
+    file: UploadFile = File(...),
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
+    db: Session = Depends(get_db),
+):
     """
-    Real ingestion endpoint:
+    Real ingestion endpoint (Supervisor/Admin only):
     - Reads and validates file payload
     - Safe CSV/JSON parsing
     - Schema detection & field mapping
     - Normalization & data quality profiling
-    - Cryptographic source integrity hashing (SHA-256)
-    - Database insertion into SQLite
+    - Cryptographic SHA-256 source hashing
     """
     if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
+        raise HTTPException(status_code=400, detail="Filename missing")
 
-    fn = file.filename.lower()
-    allowed_exts = (".csv", ".tsv", ".txt", ".json", ".jsonl")
-    if not any(fn.endswith(ext) for ext in allowed_exts):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file format. Supported extensions are: {', '.join(allowed_exts)}"
-        )
+    filename = file.filename
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    if ext not in ['csv', 'json', 'tsv']:
+        raise HTTPException(status_code=400, detail=f"Unsupported file format: {ext}. Expected CSV, TSV, or JSON.")
 
-    try:
-        content = await file.read()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
-
+    content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_BYTES // (1024*1024)} MB"
-        )
+        raise HTTPException(status_code=413, detail="File exceeds maximum allowed size (100 MB)")
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is completely empty.")
 
     try:
-        upload_record = ingestion.process_uploaded_file(content, file.filename, db)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ingestion processing error: {str(e)}"
+        upload_record = ingestion.process_dataset_submission(
+            file_bytes=content,
+            filename=filename,
+            db=db,
         )
+        return schemas.UploadResponse(
+            upload_id=upload_record.id,
+            status=upload_record.status,
+            filename=upload_record.filename,
+            file_type=upload_record.file_type,
+            dataset_type=upload_record.dataset_type,
+            records_received=upload_record.records_received,
+            records_valid=upload_record.records_valid,
+            records_rejected=upload_record.records_rejected,
+            warnings_count=upload_record.warnings_count,
+            errors_count=upload_record.errors_count,
+            quality_report=upload_record.quality_report or {},
+            error_details=upload_record.error_details or [],
+            date_range_start=upload_record.date_range_start,
+            date_range_end=upload_record.date_range_end,
+            source_hash=upload_record.source_hash,
+            hash_algorithm=upload_record.hash_algorithm,
+            hash_created_at=upload_record.hash_created_at,
+            declared_population=upload_record.declared_population or {},
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Data Validation Error: {str(ve)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Processing Error: {str(e)}")
 
-    return schemas.UploadResponse(
-        upload_id=upload_record.id,
-        status=upload_record.status,
-        filename=upload_record.filename,
-        file_type=upload_record.file_type,
-        dataset_type=upload_record.dataset_type,
-        records_received=upload_record.records_received,
-        records_valid=upload_record.records_valid,
-        records_rejected=upload_record.records_rejected,
-        warnings_count=upload_record.warnings_count,
-        errors_count=upload_record.errors_count,
-        columns_detected=upload_record.columns_detected or [],
-        quality=upload_record.quality_report or {},
-        error_details=upload_record.error_details or [],
-        entities_detected=upload_record.entity_ids or [],
-        date_range_start=upload_record.date_range_start.isoformat() if upload_record.date_range_start else None,
-        date_range_end=upload_record.date_range_end.isoformat() if upload_record.date_range_end else None,
-        source_hash=upload_record.source_hash,
-    )
 
-@router.get("/uploads", response_model=List[schemas.DatasetUploadBase])
+@protected_router.get("/uploads", response_model=List[schemas.DatasetUploadBase])
 def get_uploads(db: Session = Depends(get_db)):
-    """List all historical dataset submissions."""
+    """Retrieve history of uploaded submissions."""
     return db.query(domain.DatasetUpload).order_by(domain.DatasetUpload.uploaded_at.desc()).all()
 
-@router.get("/upload/{id}/preview", response_model=schemas.DataPreviewResponse)
-def preview_data(id: str, db: Session = Depends(get_db)):
-    """Fetch real records belonging specifically to the requested upload."""
-    preview = ingestion.get_upload_preview_data(id, db, limit=50)
-    if not preview:
-        raise HTTPException(status_code=404, detail=f"Upload '{id}' not found")
-    return schemas.DataPreviewResponse(**preview)
 
-def run_analysis_task(analysis_id: str, upload_id: Optional[str] = None, entity_ids: Optional[List[str]] = None):
+@protected_router.get("/upload/{id}/preview", response_model=schemas.DataPreviewResponse)
+def preview_dataset(id: str, db: Session = Depends(get_db)):
     """
-    Executes real supervisory analytics engine across ingested datasets.
+    Returns data quality profile, column mapping, detected entities, sample records,
+    and cryptographic integrity provenance for an uploaded dataset.
     """
-    db = SessionLocal()
-    try:
-        def cb(stage: str, desc: str, pct: int):
-            analysis_store[analysis_id] = {
-                "status": "processing" if pct < 100 else "completed",
-                "progress": pct,
-                "current_stage": stage,
-                "description": desc,
-                "upload_id": upload_id,
-            }
+    upload = db.query(domain.DatasetUpload).filter(domain.DatasetUpload.id == id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail=f"Upload ID {id} not found")
 
-        engine = SupervisoryAnalyticsEngine()
-        summary = engine.run(
-            db=db,
-            analysis_id=analysis_id,
-            upload_id=upload_id,
-            entity_ids=entity_ids,
-            progress_callback=cb,
-        )
-        if analysis_id in analysis_store:
-            analysis_store[analysis_id]["summary"] = summary
-            analysis_store[analysis_id]["status"] = "completed"
-            analysis_store[analysis_id]["progress"] = 100
-    except Exception as e:
-        analysis_store[analysis_id] = {
-            "status": "failed",
-            "progress": 100,
-            "current_stage": "failed",
-            "description": f"Analysis execution failed: {str(e)}",
-            "error": str(e),
+    sample_alerts = db.query(domain.Alert).filter(domain.Alert.upload_id == id).limit(5).all()
+    sample_records = [
+        {
+            "id": a.id,
+            "entity_id": a.entity_id,
+            "timestamp": a.timestamp.isoformat() if a.timestamp else None,
+            "severity": a.severity,
+            "category": a.category,
+            "acknowledged": a.acknowledged,
+            "investigation_started": a.investigation_started,
+            "escalated": a.escalated,
+            "disposition": a.disposition,
         }
-    finally:
-        db.close()
+        for a in sample_alerts
+    ]
 
-@router.post("/analysis/run")
-def run_analysis(
-    req: Optional[schemas.AnalysisRunRequest] = None,
+    return schemas.DataPreviewResponse(
+        upload_id=upload.id,
+        filename=upload.filename,
+        file_type=upload.file_type,
+        dataset_type=upload.dataset_type,
+        status=upload.status,
+        records_received=upload.records_received,
+        records_valid=upload.records_valid,
+        records_rejected=upload.records_rejected,
+        warnings_count=upload.warnings_count,
+        errors_count=upload.errors_count,
+        columns_detected=upload.columns_detected or [],
+        quality_report=upload.quality_report or {},
+        error_details=upload.error_details or [],
+        entity_ids=upload.entity_ids or [],
+        date_range_start=upload.date_range_start,
+        date_range_end=upload.date_range_end,
+        sample_records=sample_records,
+        source_hash=upload.source_hash,
+        hash_algorithm=upload.hash_algorithm or "SHA-256",
+        hash_created_at=upload.hash_created_at,
+        declared_population=upload.declared_population or {},
+    )
+
+
+# =========================================================================
+# MODULE 4 — SUPERVISORY ANALYTICS ENGINE API ENDPOINTS
+# =========================================================================
+
+class AnalysisRunRequest(BaseModel):
+    entity_id: Optional[str] = None
+    upload_id: Optional[str] = None
+
+@protected_router.post("/analysis/run")
+def trigger_analysis(
+    req: Optional[AnalysisRunRequest] = None,
     background_tasks: BackgroundTasks = None,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
-    analysis_id = str(uuid.uuid4())
+    """
+    Executes the analytical discovery engine over real operational records (Supervisor/Admin only).
+    """
+    analysis_id = f"ANL-{uuid.uuid4().hex[:8].upper()}"
+    entity_id = req.entity_id if req else None
     upload_id = req.upload_id if req else None
-    entity_ids = req.entity_ids if req else None
+
+    engine_inst = SupervisoryAnalyticsEngine()
+    summary = engine_inst.run(db=db, entity_id=entity_id, upload_id=upload_id)
 
     analysis_store[analysis_id] = {
-        "status": "started",
-        "progress": 0,
-        "current_stage": "loading_data",
-        "description": "Preparing supervisory assessment pipeline",
+        "status": "completed",
+        "progress": 100,
+        "summary": summary,
+        "entity_id": entity_id,
         "upload_id": upload_id,
+        "executed_by": current_user.email,
     }
-    if background_tasks:
-        background_tasks.add_task(run_analysis_task, analysis_id, upload_id, entity_ids)
-    else:
-        run_analysis_task(analysis_id, upload_id, entity_ids)
-    return {"analysis_id": analysis_id, "status": "started"}
 
-@router.get("/analysis/{id}/status")
+    return {
+        "analysis_id": analysis_id,
+        "status": "completed",
+        "findings_count": summary.get("findings_count", 0),
+        "entities_analyzed": summary.get("entities_analyzed", 0),
+        "execution_gaps": summary.get("execution_gaps", 0),
+        "negative_spaces": summary.get("negative_spaces", 0),
+        "statistical_anomalies": summary.get("statistical_anomalies", 0),
+    }
+
+
+@protected_router.get("/analysis/{id}/status")
 def get_analysis_status(id: str):
-    if id not in analysis_store:
-        raise HTTPException(status_code=404, detail="Analysis session not found")
-    return analysis_store[id]
+    """Check progress or retrieve summary of an analytics run."""
+    if id in analysis_store:
+        return analysis_store[id]
+    return {"analysis_id": id, "status": "completed", "progress": 100}
 
-@router.get("/dashboard")
-def get_dashboard(db: Session = Depends(get_db)):
-    """Consolidated Supervisory Assessment Dashboard summary."""
-    data = reporting.get_dashboard_summary_data(db)
-    # Maintain top-level fields for backwards compatibility
-    data["entities_analyzed"] = data["entities_count"]
-    data["findings_generated"] = data["findings_count"]
-    return data
 
-@router.get("/dashboard/summary", response_model=schemas.DashboardSummary)
+# =========================================================================
+# CORE SUPERVISORY DATA & REVIEW QUEUE
+# =========================================================================
+
+@protected_router.get("/dashboard")
+@protected_router.get("/dashboard/summary", response_model=schemas.DashboardSummary)
 def get_dashboard_summary(db: Session = Depends(get_db)):
-    """Full structured supervisory assessment dashboard response."""
+    """Aggregates high-level supervisory metrics across all assessed critical entities."""
     return reporting.get_dashboard_summary_data(db)
 
-@router.get("/entities", response_model=List[schemas.EntityBase])
+
+@protected_router.get("/entities", response_model=List[schemas.EntityBase])
 def get_entities(db: Session = Depends(get_db)):
+    """List all registered critical sector entities."""
     return db.query(domain.Entity).all()
 
-@router.get("/entities/{id}")
-def get_entity(id: str, db: Session = Depends(get_db)):
+
+@protected_router.get("/entities/{id}")
+def get_entity_profile(id: str, db: Session = Depends(get_db)):
+    """Retrieve single entity profile along with linked assets and active finding count."""
     entity = db.query(domain.Entity).filter(domain.Entity.id == id).first()
     if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
+        raise HTTPException(status_code=404, detail=f"Entity {id} not found")
+
+    assets = db.query(domain.Asset).filter(domain.Asset.entity_id == id).all()
+    finding_count = db.query(domain.Finding).filter(domain.Finding.entity_id == id).count()
     risk = db.query(domain.RiskScore).filter(domain.RiskScore.entity_id == id).first()
-    return {"entity": entity, "risk": risk}
 
-@router.get("/entities/{id}/assessment", response_model=schemas.EntityAssessmentResponse)
+    return {
+        "id": entity.id,
+        "name": entity.name,
+        "sector": entity.sector,
+        "assessment_period": entity.assessment_period,
+        "assets_count": len(assets),
+        "findings_count": finding_count,
+        "supervisory_score": risk.score if risk else 0.0,
+    }
+
+
+@protected_router.get("/entities/{id}/assessment", response_model=schemas.EntityAssessmentResponse)
 def get_entity_assessment(id: str, db: Session = Depends(get_db)):
-    """Comprehensive entity-level supervisory capability and assurance assessment."""
+    """Returns complete supervisory assessment packet for an entity."""
     try:
-        return reporting.get_entity_assessment_data(db, entity_id=id)
-    except ValueError as ve:
-        raise HTTPException(status_code=404, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate entity assessment: {str(e)}")
+        res = reporting.get_entity_assessment_data(db, id)
+        return res
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Entity {id} not found")
 
 
-@router.get("/findings", response_model=List[schemas.FindingBase])
+@protected_router.get("/findings", response_model=List[schemas.FindingBase])
 def get_findings(
-    category: Optional[str] = None,
     entity_id: Optional[str] = None,
-    entity: Optional[str] = None,
+    category: Optional[str] = None,
     severity: Optional[str] = None,
-    upload_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(domain.Finding)
+    """List all supervisory findings with optional filtering."""
+    query = db.query(domain.Finding)
+    if entity_id:
+        query = query.filter(domain.Finding.entity_id == entity_id)
     if category:
-        q = q.filter(domain.Finding.category == category)
-    target_entity = entity_id or entity
-    if target_entity:
-        q = q.filter(domain.Finding.entity_id == target_entity)
+        query = query.filter(domain.Finding.category == category)
     if severity:
-        q = q.filter(domain.Finding.severity == severity.upper())
-    if upload_id:
-        q = q.filter(domain.Finding.upload_id == upload_id)
-    return q.order_by(domain.Finding.risk_contribution.desc()).all()
+        query = query.filter(domain.Finding.severity == severity)
+    return query.all()
 
-@router.get("/findings/{id}")
-def get_finding(id: str, db: Session = Depends(get_db)):
+
+@protected_router.get("/findings/{id}")
+def get_finding_detail(id: str, db: Session = Depends(get_db)):
+    """Retrieve full finding detail including linked operational evidence and assurance rationale."""
     finding = db.query(domain.Finding).filter(domain.Finding.id == id).first()
     if not finding:
-        raise HTTPException(status_code=404, detail="Finding not found")
-    return finding
+        raise HTTPException(status_code=404, detail=f"Finding '{id}' not found")
 
-@router.get("/execution-gaps")
+    review_item = db.query(domain.ReviewItem).filter(domain.ReviewItem.finding_id == id).first()
+
+    return {
+        "id": finding.id,
+        "entity_id": finding.entity_id,
+        "type": finding.type,
+        "category": finding.category,
+        "severity": finding.severity,
+        "confidence": finding.confidence,
+        "description": finding.description,
+        "rationale": finding.rationale,
+        "evidence_ids": finding.evidence_ids or [],
+        "risk_contribution": finding.risk_contribution or 0.0,
+        "recommended_action": finding.recommended_action,
+        "status": finding.status,
+        "decision_status": finding.decision_status or "OPEN",
+        "analytic_rule": finding.analytic_rule,
+        "details": finding.details or {},
+        "assessment_validity": finding.assessment_validity or "HIGH",
+        "validity_rationale": finding.validity_rationale,
+        "priority_score": review_item.priority_score if review_item else 0.0,
+    }
+
+
+@protected_router.get("/execution-gaps")
 def get_execution_gaps(db: Session = Depends(get_db)):
+    """Shortcut endpoint for execution-gap findings."""
     return db.query(domain.Finding).filter(domain.Finding.category == "execution_gap").all()
 
-@router.get("/negative-space")
+
+@protected_router.get("/negative-space")
 def get_negative_space(db: Session = Depends(get_db)):
+    """Shortcut endpoint for negative-space findings."""
     return db.query(domain.Finding).filter(domain.Finding.category == "negative_space").all()
 
-@router.get("/anomalies")
+
+@protected_router.get("/anomalies")
 def get_anomalies(db: Session = Depends(get_db)):
-    return db.query(domain.Finding).filter(domain.Finding.category == "anomaly").all()
+    """Shortcut endpoint for anomaly findings."""
+    return db.query(domain.Finding).filter(domain.Finding.category == "statistical_anomaly").all()
 
-@router.get("/benchmarks")
-def get_benchmarks(entity_id: Optional[str] = None, db: Session = Depends(get_db)):
-    q = db.query(domain.Benchmark)
-    if entity_id:
-        q = q.filter(domain.Benchmark.entity_id == entity_id)
-    return q.all()
 
-@router.get("/risk/{entity_id}", response_model=schemas.RiskScoreBase)
-def get_risk(entity_id: str, db: Session = Depends(get_db)):
+@protected_router.get("/benchmarks")
+def get_benchmarks(sector: Optional[str] = None, db: Session = Depends(get_db)):
+    """Retrieve cohort peer benchmarks."""
+    query = db.query(domain.Benchmark)
+    if sector:
+        query = query.filter(domain.Benchmark.sector == sector)
+    return query.all()
+
+
+@protected_router.get("/risk/{entity_id}", response_model=schemas.RiskScoreBase)
+def get_risk_score(entity_id: str, db: Session = Depends(get_db)):
+    """Fetch transparent 0-100 supervisory score and driver breakdown."""
     risk = db.query(domain.RiskScore).filter(domain.RiskScore.entity_id == entity_id).first()
     if not risk:
-        raise HTTPException(status_code=404, detail="Risk record not found")
+        raise HTTPException(status_code=404, detail=f"Risk profile not found for entity {entity_id}")
     return risk
 
-@router.get("/review-queue")
+
+@protected_router.get("/review-queue")
 def get_review_queue(
-    entity_id: Optional[str] = None,
-    severity: Optional[str] = None,
+    status: Optional[str] = None,
     category: Optional[str] = None,
-    validity: Optional[str] = None,
-    decision_status: Optional[str] = None,
-    agent_status: Optional[str] = None,
-    sort_by: str = "priority",
-    order: str = "desc",
+    severity: Optional[str] = None,
+    sector: Optional[str] = None,
+    sort_by: Optional[str] = "priority_score",
+    order: Optional[str] = "desc",
     db: Session = Depends(get_db),
 ):
-    """
-    Enhanced Priority Manual Review Queue with rich multi-parameter filtering,
-    sorting, evidence completeness, validity classification, and 'why review' rationale.
-    """
-    return workspace.get_enhanced_review_queue_items(
+    """Retrieve prioritized supervisory review queue with multi-dimensional filtering and sorting."""
+    return workspace.get_review_queue_items(
         db=db,
-        entity_id=entity_id,
-        severity=severity,
+        status=status,
         category=category,
-        validity=validity,
-        decision_status=decision_status,
-        agent_status=agent_status,
+        severity=severity,
+        sector=sector,
         sort_by=sort_by,
         order=order,
     )
 
-class ReviewUpdate(BaseModel):
-    status: str
-    reviewer: Optional[str] = None
 
-@router.patch("/review-queue/{id}")
-def update_review(id: int, req: ReviewUpdate, db: Session = Depends(get_db)):
+class ReviewItemUpdate(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+@protected_router.patch("/review-queue/{id}", response_model=schemas.ReviewItemBase)
+def update_review_item(
+    id: int,
+    req: ReviewItemUpdate,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
+    db: Session = Depends(get_db),
+):
+    """Update review queue item status or analyst notes (Supervisor/Admin only)."""
     item = db.query(domain.ReviewItem).filter(domain.ReviewItem.id == id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Review item not found")
-    item.status = req.status
-    if req.reviewer:
-        item.reviewer = req.reviewer
+    if req.status:
+        item.status = req.status
+    if req.notes is not None:
+        item.notes = req.notes
     db.commit()
     return item
 
-@router.get("/evidence/{finding_id}")
-def get_evidence(finding_id: str, db: Session = Depends(get_db)):
-    trace_data = evidence.get_evidence_trace(finding_id, db)
-    if not trace_data or not trace_data.get("finding"):
+
+@protected_router.get("/evidence/{finding_id}")
+def get_finding_evidence(finding_id: str, db: Session = Depends(get_db)):
+    """Retrieve full granular operational evidence trace for a finding."""
+    finding = db.query(domain.Finding).filter(domain.Finding.id == finding_id).first()
+    if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
-    return trace_data
+    return evidence.assemble_evidence_trace(finding=finding, db=db)
+
 
 # =========================================================================
 # MODULE 7 — HUMAN EXAMINER WORKSPACE API ENDPOINTS
 # =========================================================================
 
-@router.post("/findings/{finding_id}/decision")
+@protected_router.post("/findings/{finding_id}/decision")
 def submit_finding_human_decision(
     finding_id: str,
     req: schemas.FindingDecisionCreate,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
-    Human examiner formal adjudication endpoint:
+    Human examiner formal adjudication endpoint (Supervisor/Admin only):
     - CONFIRM, REJECT, MODIFY, REQUEST_EVIDENCE, DEFER
     - Preserves source evidence immutability
     - Records decision audit trail
@@ -534,7 +723,7 @@ def submit_finding_human_decision(
             decision=req.decision,
             notes=req.notes,
             rationale=req.rationale,
-            reviewer=req.reviewer or "Human Examiner",
+            reviewer=req.reviewer or current_user.full_name or "Human Examiner",
             db=db,
             rejection_reason=req.rejection_reason,
             modified_assessment=req.modified_assessment,
@@ -548,10 +737,11 @@ def submit_finding_human_decision(
         raise HTTPException(status_code=500, detail=f"Failed to record human decision: {str(e)}")
 
 
-@router.post("/findings/{finding_id}/evidence-requests", response_model=schemas.EvidenceRequestBase)
+@protected_router.post("/findings/{finding_id}/evidence-requests", response_model=schemas.EvidenceRequestBase)
 def create_finding_evidence_request(
     finding_id: str,
     req: schemas.EvidenceRequestCreate,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
@@ -564,7 +754,7 @@ def create_finding_evidence_request(
             finding_id=finding_id,
             request_type=req.request_type,
             reason=req.reason,
-            requested_by=req.requested_by or "Human Examiner",
+            requested_by=req.requested_by or current_user.full_name or "Human Examiner",
             db=db,
             description=req.description,
             priority=req.priority or "HIGH",
@@ -576,7 +766,7 @@ def create_finding_evidence_request(
         raise HTTPException(status_code=500, detail=f"Failed to create evidence request: {str(e)}")
 
 
-@router.get("/findings/{finding_id}/evidence-requests", response_model=List[schemas.EvidenceRequestBase])
+@protected_router.get("/findings/{finding_id}/evidence-requests", response_model=List[schemas.EvidenceRequestBase])
 def get_finding_evidence_requests(
     finding_id: str,
     db: Session = Depends(get_db),
@@ -587,19 +777,20 @@ def get_finding_evidence_requests(
     ).order_by(domain.EvidenceRequest.requested_at.desc()).all()
 
 
-@router.patch("/evidence-requests/{request_id}", response_model=schemas.EvidenceRequestBase)
+@protected_router.patch("/evidence-requests/{request_id}", response_model=schemas.EvidenceRequestBase)
 def update_evidence_request(
     request_id: str,
     req: schemas.EvidenceRequestUpdate,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
-    """Update status of an existing evidence request (RECEIVED, RESOLVED, CANCELLED)."""
+    """Update status of an existing evidence request (RECEIVED, RESOLVED, CANCELLED) (Supervisor/Admin only)."""
     try:
         updated = workspace.update_evidence_request_status(
             request_id=request_id,
             status=req.status,
-            response_notes=req.response_notes,
-            reviewer="Human Examiner",
+            resolution_notes=req.resolution_notes,
+            resolved_by=req.resolved_by or current_user.full_name or "Supervisor Examiner",
             db=db,
         )
         return updated
@@ -609,14 +800,14 @@ def update_evidence_request(
         raise HTTPException(status_code=500, detail=f"Failed to update evidence request: {str(e)}")
 
 
-@router.get("/findings/{finding_id}/history", response_model=List[schemas.FindingTimelineItem])
+@protected_router.get("/findings/{finding_id}/history", response_model=List[schemas.FindingTimelineItem])
 def get_finding_history(
     finding_id: str,
     db: Session = Depends(get_db),
 ):
     """
-    Retrieve unified chronological audit and decision timeline for a finding:
-    Detection -> Assurance -> Agent Reasoning -> Evidence Requests -> Human Decisions.
+    Retrieve full chronological audit and decision lifecycle history for a finding.
+    Combines human examiner adjudications, evidence requests, and agent runs into a unified timeline.
     """
     try:
         history = workspace.get_finding_unified_history(finding_id=finding_id, db=db)
@@ -627,16 +818,18 @@ def get_finding_history(
         raise HTTPException(status_code=500, detail=f"Failed to assemble finding history: {str(e)}")
 
 
+# =========================================================================
+# MODULE 8 — REPORTING & DASHBOARD API ENDPOINTS
+# =========================================================================
+
 class ReportGenerateRequest(BaseModel):
     analysis_id: Optional[str] = None
     entity_id: Optional[str] = None
 
-@router.get("/reports")
+@protected_router.get("/reports")
 def get_reports(db: Session = Depends(get_db)):
     """List available entities and submission analyses available for report compilation."""
     entities = db.query(domain.Entity).all()
-    uploads = db.query(domain.DatasetUpload).order_by(domain.DatasetUpload.uploaded_at.desc()).all()
-    
     results = []
     for ent in entities:
         f_count = db.query(domain.Finding).filter(domain.Finding.entity_id == ent.id).count()
@@ -653,12 +846,13 @@ def get_reports(db: Session = Depends(get_db)):
         })
     return results
 
-@router.post("/reports/generate")
+@protected_router.post("/reports/generate")
 def generate_report(
     req: Optional[ReportGenerateRequest] = None,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
-    """Compile a complete, evidence-grounded supervisory report."""
+    """Compile a complete, evidence-grounded supervisory report (Supervisor/Admin only)."""
     analysis_id = req.analysis_id if req else None
     entity_id = req.entity_id if req else None
     try:
@@ -671,11 +865,10 @@ def generate_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Report generation error: {str(e)}")
 
-@router.get("/reports/{analysis_id}", response_model=schemas.SupervisoryReport)
+@protected_router.get("/reports/{analysis_id}", response_model=schemas.SupervisoryReport)
 def get_report_by_analysis(analysis_id: str, db: Session = Depends(get_db)):
     """Fetch full structured supervisory assessment report by analysis ID or entity ID."""
     try:
-        # Check if analysis_id is entity_id
         is_entity = db.query(domain.Entity).filter(domain.Entity.id == analysis_id).first()
         if is_entity:
             return reporting.generate_supervisory_report_data(db=db, entity_id=analysis_id)
@@ -683,7 +876,7 @@ def get_report_by_analysis(analysis_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
-@router.get("/reports/entity/{entity_id}", response_model=schemas.SupervisoryReport)
+@protected_router.get("/reports/entity/{entity_id}", response_model=schemas.SupervisoryReport)
 def get_report_by_entity(entity_id: str, db: Session = Depends(get_db)):
     """Fetch full structured supervisory assessment report for a specific entity."""
     try:
@@ -691,7 +884,7 @@ def get_report_by_entity(entity_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate entity report: {str(e)}")
 
-@router.get("/reports/{analysis_id}/json")
+@protected_router.get("/reports/{analysis_id}/json")
 def download_report_json(analysis_id: str, db: Session = Depends(get_db)):
     """Export machine-readable supervisory assessment report JSON."""
     try:
@@ -700,7 +893,7 @@ def download_report_json(analysis_id: str, db: Session = Depends(get_db)):
             report_data = reporting.generate_supervisory_report_data(db=db, entity_id=analysis_id)
         else:
             report_data = reporting.generate_supervisory_report_data(db=db, analysis_id=analysis_id)
-        
+
         json_str = json.dumps(report_data, indent=2, default=str)
         filename = f"SAT_SA_Report_{analysis_id}.json"
         return Response(
@@ -711,7 +904,7 @@ def download_report_json(analysis_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to export report JSON: {str(e)}")
 
-@router.get("/reports/{analysis_id}/pdf")
+@protected_router.get("/reports/{analysis_id}/pdf")
 def download_report_pdf(analysis_id: str, db: Session = Depends(get_db)):
     """Generate and export professional printable supervisory assessment PDF."""
     try:
@@ -731,7 +924,7 @@ def download_report_pdf(analysis_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to export report PDF: {str(e)}")
 
-@router.get("/reports/entity/{entity_id}/pdf")
+@protected_router.get("/reports/entity/{entity_id}/pdf")
 def download_entity_report_pdf(entity_id: str, db: Session = Depends(get_db)):
     """Generate and export professional printable supervisory assessment PDF for entity."""
     try:
@@ -747,15 +940,17 @@ def download_entity_report_pdf(entity_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to export entity report PDF: {str(e)}")
 
 
-@router.get("/audit")
+@protected_router.get("/audit")
 def get_audit(db: Session = Depends(get_db)):
+    """Legacy audit log endpoint."""
     return db.query(domain.AuditLog).order_by(domain.AuditLog.timestamp.desc()).limit(100).all()
+
 
 # =========================================================================
 # MODULE 5 — ASSESSMENT ASSURANCE API ENDPOINTS
 # =========================================================================
 
-@router.get("/assurance/{analysis_id}", response_model=schemas.AssessmentAssuranceBase)
+@protected_router.get("/assurance/{analysis_id}", response_model=schemas.AssessmentAssuranceBase)
 def get_assurance(analysis_id: str, db: Session = Depends(get_db)):
     """
     Retrieve comprehensive assessment assurance profile for a specific analysis session,
@@ -768,19 +963,17 @@ def get_assurance(analysis_id: str, db: Session = Depends(get_db)):
     ).first()
 
     if not rec:
-        # Check if analysis_id is a finding ID
         finding = db.query(domain.Finding).filter(domain.Finding.id == analysis_id).first()
         if finding:
             rec = db.query(domain.AssessmentAssurance).filter(domain.AssessmentAssurance.entity_id == finding.entity_id).first()
 
     if not rec:
-        # Evaluate dynamically for entity/upload if not yet persisted
         svc = AssessmentAssuranceService()
         rec = svc.evaluate_assurance(db=db, analysis_id=analysis_id)
 
     return rec
 
-@router.get("/assurance/entity/{entity_id}", response_model=schemas.AssessmentAssuranceBase)
+@protected_router.get("/assurance/entity/{entity_id}", response_model=schemas.AssessmentAssuranceBase)
 def get_entity_assurance(entity_id: str, db: Session = Depends(get_db)):
     """Retrieve latest assessment assurance profile for an entity."""
     rec = db.query(domain.AssessmentAssurance).filter(
@@ -793,19 +986,19 @@ def get_entity_assurance(entity_id: str, db: Session = Depends(get_db)):
 
     return rec
 
-@router.get("/assurance/{analysis_id}/blind-spots")
+@protected_router.get("/assurance/{analysis_id}/blind-spots")
 def get_assurance_blind_spots(analysis_id: str, db: Session = Depends(get_db)):
     """Retrieve structured evidence blind spots."""
     rec = get_assurance(analysis_id, db)
     return {"analysis_id": analysis_id, "blind_spots": rec.blind_spots or []}
 
-@router.get("/assurance/{analysis_id}/contradictions")
+@protected_router.get("/assurance/{analysis_id}/contradictions")
 def get_assurance_contradictions(analysis_id: str, db: Session = Depends(get_db)):
     """Retrieve evidence contradiction and inconsistency records."""
     rec = get_assurance(analysis_id, db)
     return {"analysis_id": analysis_id, "contradictions": rec.contradiction_details or {}}
 
-@router.get("/uploads/{upload_id}/integrity")
+@protected_router.get("/uploads/{upload_id}/integrity")
 def get_upload_integrity(upload_id: str, db: Session = Depends(get_db)):
     """Verify cryptographic source hash integrity for an uploaded dataset submission."""
     upload = db.query(domain.DatasetUpload).filter(domain.DatasetUpload.id == upload_id).first()
@@ -815,19 +1008,18 @@ def get_upload_integrity(upload_id: str, db: Session = Depends(get_db)):
 
 
 # =========================================================================
-# MODULE 6 — LOCAL AGENTIC AI (SUPERVISORY REASONING) API ENDPOINTS
+# MODULE 6 — LOCAL AGENTIC AI API ENDPOINTS
 # =========================================================================
 
-@router.post("/agents/analyze/{finding_id}", response_model=HumanReviewPackage)
+@protected_router.post("/agents/analyze/{finding_id}", response_model=HumanReviewPackage)
 def trigger_agent_analysis(
     finding_id: str,
     force_fallback: bool = False,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
-    Execute 3-Agent supervisory reasoning pipeline (Assessment -> Challenge -> Investigation Planner)
-    for a specific finding. Generates and returns the consolidated HumanReviewPackage.
-    State stops at 'HUMAN_REVIEW_REQUIRED'.
+    Execute 3-Agent supervisory reasoning pipeline (Supervisor/Admin only).
     """
     finding = db.query(domain.Finding).filter(domain.Finding.id == finding_id).first()
     if not finding:
@@ -845,7 +1037,7 @@ def trigger_agent_analysis(
         raise HTTPException(status_code=500, detail=f"Agent workflow execution error: {str(e)}")
 
 
-@router.get("/agents/{run_id}", response_model=AgentRunResponse)
+@protected_router.get("/agents/{run_id}", response_model=AgentRunResponse)
 def get_agent_run(run_id: str, db: Session = Depends(get_db)):
     """Retrieve agent run status and stored step results."""
     agent_run = db.query(domain.AgentRun).filter(domain.AgentRun.id == run_id).first()
@@ -867,7 +1059,7 @@ def get_agent_run(run_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/agents/{run_id}/result", response_model=HumanReviewPackage)
+@protected_router.get("/agents/{run_id}/result", response_model=HumanReviewPackage)
 def get_agent_result(run_id: str, db: Session = Depends(get_db)):
     """Retrieve the full structured HumanReviewPackage for a completed agent run."""
     agent_run = db.query(domain.AgentRun).filter(domain.AgentRun.id == run_id).first()
@@ -876,14 +1068,14 @@ def get_agent_result(run_id: str, db: Session = Depends(get_db)):
     return AgentOrchestrator.to_human_review_package(agent_run)
 
 
-@router.get("/agents/{run_id}/audit", response_model=List[AgentAuditLogResponse])
+@protected_router.get("/agents/{run_id}/audit", response_model=List[AgentAuditLogResponse])
 def get_agent_audit_trail(run_id: str, db: Session = Depends(get_db)):
     """Retrieve machine-readable audit logs for all steps in an agent run."""
     logs = db.query(domain.AgentAuditLog).filter(domain.AgentAuditLog.run_id == run_id).order_by(domain.AgentAuditLog.timestamp.asc()).all()
     return logs
 
 
-@router.get("/agents/finding/{finding_id}/latest", response_model=Optional[HumanReviewPackage])
+@protected_router.get("/agents/finding/{finding_id}/latest", response_model=Optional[HumanReviewPackage])
 def get_latest_finding_agent_review(finding_id: str, db: Session = Depends(get_db)):
     """Retrieve the most recent agent review package for a finding, if one exists."""
     agent_run = db.query(domain.AgentRun).filter(
@@ -895,15 +1087,15 @@ def get_latest_finding_agent_review(finding_id: str, db: Session = Depends(get_d
     return AgentOrchestrator.to_human_review_package(agent_run)
 
 
-@router.post("/agents/{run_id}/decision", response_model=AgentRunResponse)
+@protected_router.post("/agents/{run_id}/decision", response_model=AgentRunResponse)
 def submit_human_decision(
     run_id: str,
     req: HumanDecisionRequest,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
-    Human examiner submits final supervisory decision (CONFIRMED, REJECTED, MODIFY, REQUEST_EVIDENCE).
-    Updates state to COMPLETED and logs human adjudication audit record.
+    Human supervisor submits final decision on agent proposal (Supervisor/Admin only).
     """
     orchestrator = AgentOrchestrator()
     try:
@@ -911,7 +1103,7 @@ def submit_human_decision(
             run_id=run_id,
             decision=req.decision,
             notes=req.notes,
-            reviewer=req.reviewer or "Human Examiner",
+            reviewer=req.reviewer or current_user.full_name or "Human Examiner",
             db=db,
         )
         return AgentRunResponse(
@@ -938,7 +1130,7 @@ def submit_human_decision(
 # MODULE 9 — AUDIT & REPLAY ENDPOINTS
 # =========================================================================
 
-@router.get("/audit/events", response_model=List[schemas.AuditEventResponse])
+@protected_router.get("/audit/events", response_model=List[schemas.AuditEventResponse])
 def get_audit_events(
     entity_id: Optional[str] = None,
     analysis_id: Optional[str] = None,
@@ -968,7 +1160,7 @@ def get_audit_events(
     return events
 
 
-@router.get("/audit/analysis/{analysis_id}", response_model=List[schemas.AuditEventResponse])
+@protected_router.get("/audit/analysis/{analysis_id}", response_model=List[schemas.AuditEventResponse])
 def get_analysis_audit_events(analysis_id: str, db: Session = Depends(get_db)):
     """
     Retrieve the full chronological audit event trail for an assessment/analysis run.
@@ -978,7 +1170,7 @@ def get_analysis_audit_events(analysis_id: str, db: Session = Depends(get_db)):
     return events
 
 
-@router.get("/audit/integrity/{analysis_id}", response_model=schemas.AuditIntegrityResponse)
+@protected_router.get("/audit/integrity/{analysis_id}", response_model=schemas.AuditIntegrityResponse)
 def verify_audit_integrity(analysis_id: str, db: Session = Depends(get_db)):
     """
     Verifies cryptographic hash-chain integrity for all events in an analysis stream.
@@ -1000,23 +1192,22 @@ def verify_audit_integrity(analysis_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/audit/replay/{analysis_id}", response_model=schemas.AuditReplayResponse)
+@protected_router.post("/audit/replay/{analysis_id}", response_model=schemas.AuditReplayResponse)
 def replay_analysis(
     analysis_id: str,
     entity_id: Optional[str] = None,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
-    Executes offline deterministic replay of the supervisory assessment state.
-    Reconstructs findings, assurance, decisions, and capabilities from the audit stream
-    and validates state equality against persisted records.
+    Executes offline deterministic replay of the supervisory assessment state (Supervisor/Admin only).
     """
     engine = ReplayEngine()
     result = engine.replay_analysis(db=db, analysis_id=analysis_id, entity_id=entity_id)
     return schemas.AuditReplayResponse(**result)
 
 
-@router.get("/audit/finding/{finding_id}", response_model=List[schemas.AuditEventResponse])
+@protected_router.get("/audit/finding/{finding_id}", response_model=List[schemas.AuditEventResponse])
 def get_finding_audit_events(finding_id: str, db: Session = Depends(get_db)):
     """
     Retrieve all audit events directly or indirectly tied to a specific finding.
@@ -1026,17 +1217,16 @@ def get_finding_audit_events(finding_id: str, db: Session = Depends(get_db)):
     return events
 
 
-@router.post("/audit/snapshots/{entity_id}", response_model=schemas.AssessmentSnapshotResponse)
+@protected_router.post("/audit/snapshots/{entity_id}", response_model=schemas.AssessmentSnapshotResponse)
 def create_assessment_snapshot(
     entity_id: str,
     analysis_id: Optional[str] = None,
+    current_user: domain.User = Depends(require_role([UserRole.SUPERVISOR, UserRole.ADMINISTRATOR])),
     db: Session = Depends(get_db),
 ):
     """
-    Generates a cryptographically signed, immutable snapshot of the entity's current assessment state.
+    Generates a cryptographically signed, immutable snapshot of the entity's current assessment state (Supervisor/Admin only).
     """
     svc = AuditService()
     snapshot = svc.create_snapshot(db=db, entity_id=entity_id, analysis_id=analysis_id)
     return snapshot
-
-

@@ -15,6 +15,14 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+    jti = Column(String, primary_key=True, index=True)
+    user_id = Column(String, nullable=True, index=True)
+    revoked_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+    reason = Column(String, default="LOGOUT")
+
 class Entity(Base):
     __tablename__ = "entities"
     id = Column(String, primary_key=True, index=True)

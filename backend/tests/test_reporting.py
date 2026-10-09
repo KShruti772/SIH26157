@@ -39,6 +39,8 @@ def db_session():
         db.close()
         Base.metadata.drop_all(bind=engine)
 
+from app.services.auth import get_current_user
+
 @pytest.fixture(scope="function")
 def client(db_session):
     def override_get_db():
@@ -46,7 +48,17 @@ def client(db_session):
             yield db_session
         finally:
             pass
+    def override_get_current_user():
+        return domain.User(
+            id="USR-TEST-SUP",
+            full_name="Lead Supervisory Examiner",
+            email="supervisor@ntro.gov",
+            role="SUPERVISOR",
+            organization="NTRO Supervisory Division",
+            is_active=True,
+        )
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_get_current_user
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

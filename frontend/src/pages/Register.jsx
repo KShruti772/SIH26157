@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Shield, Eye, EyeOff, Lock, Mail, User, Building, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Shield, Eye, EyeOff, Lock, Mail, User, Building, AlertCircle, Info } from 'lucide-react';
 import api from '../services/api';
 
 const Register = () => {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [organization, setOrganization] = useState('');
-  const [role, setRole] = useState('SUPERVISOR');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -49,7 +48,7 @@ const Register = () => {
         full_name: fullName.trim(),
         email: email.trim().toLowerCase(),
         organization: organization.trim(),
-        role: role,
+        role: 'REVIEWER',
         password: password,
         confirm_password: confirmPassword,
       });
@@ -164,43 +163,20 @@ const Register = () => {
               </div>
             </div>
 
-            {/* Role Selection */}
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Supervisory Role
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setRole('SUPERVISOR')}
-                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg border text-left text-xs font-medium transition-all ${
-                    role === 'SUPERVISOR'
-                      ? 'bg-blue-600/20 border-blue-500 text-blue-300 shadow-sm'
-                      : 'bg-slate-700/50 border-slate-600 text-slate-300 hover:bg-slate-700'
-                  }`}
-                >
-                  <div>
-                    <div className="font-semibold text-slate-100">Supervisor</div>
-                    <div className="text-[10px] text-slate-400">Adjudication & Final Decisions</div>
-                  </div>
-                  {role === 'SUPERVISOR' && <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setRole('REVIEWER')}
-                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg border text-left text-xs font-medium transition-all ${
-                    role === 'REVIEWER'
-                      ? 'bg-blue-600/20 border-blue-500 text-blue-300 shadow-sm'
-                      : 'bg-slate-700/50 border-slate-600 text-slate-300 hover:bg-slate-700'
-                  }`}
-                >
-                  <div>
-                    <div className="font-semibold text-slate-100">Reviewer</div>
-                    <div className="text-[10px] text-slate-400">Analysis & Finding Review</div>
-                  </div>
-                  {role === 'REVIEWER' && <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />}
-                </button>
+            {/* Account Role Badge */}
+            <div className="bg-slate-900/60 p-3 rounded-lg border border-slate-700/70">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider block">Assigned Role</span>
+                  <span className="text-xs font-semibold text-emerald-400">REVIEWER</span>
+                </div>
+                <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  Analyst & Finding Review
+                </span>
+              </div>
+              <div className="flex items-start gap-1.5 mt-2 text-[10px] text-slate-400">
+                <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                <span>Supervisory and administrator access are provisioned via system administrator.</span>
               </div>
             </div>
 
@@ -224,7 +200,7 @@ const Register = () => {
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200"
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200 cursor-pointer"
                 >
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -251,7 +227,7 @@ const Register = () => {
                 <button
                   type="button"
                   onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200"
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-200 cursor-pointer"
                 >
                   {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
