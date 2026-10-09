@@ -247,4 +247,3 @@ def test_bootstrap_interactive_promotion_confirmation(bootstrap_db, monkeypatch)
     assert confirmed is not None
     assert confirmed.role == UserRole.ADMINISTRATOR
     assert verify_password("ConfirmedNewPassword123!", confirmed.password_hash) is True
-
